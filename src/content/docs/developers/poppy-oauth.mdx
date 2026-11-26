@@ -1,0 +1,135 @@
+---
+title: "Per-app OAuth (Poppy)"
+description: "Configure isolated per-Company OAuth 2.1 sign-in for Personal Agent Protocol (Poppy 1.0) using an external issuer or the standalone poppy-oauth source package."
+section: "Assistants & MCP"
+order: 6
+---
+
+In Personal Agent Protocol (Poppy 1.0), a Company is identified by its OAuth issuer. Customer applications on Ferrite must never share a single platform SSO issuer: each application chooses its own isolated authorization posture in `PoppyAuth` so user grants, scopes, and revocations belong strictly to that product.
+
+## Choose an authorization model
+
+| `PoppyAuth` variant | When to use it | What your app serves |
+| --- | --- | --- |
+| `PoppyAuth::SignedOut` | Public catalogues, read-only tools, or apps without user accounts | `/.well-known/oauth-protected-resource` returns `404`; Company ID is `https://<domain>` |
+| `PoppyAuth::Disabled { issuer }` | Your app has an issuer for a stable Company ID but disables agent sign-in | Sets `auth.disabled: true` in `poppy.json` and exposes no agent sign-in grant |
+| `PoppyAuth::External { issuer, scopes, .. }` | You already run Auth0, WorkOS, Clerk, Okta, or your own OAuth 2.1 server | Publishes RFC 9728 metadata pointing personal agents to your external `issuer` |
+| `PoppyAuth::SelfHosted { scopes, .. }` | You want a self-contained per-app OAuth 2.1 issuer compiled directly into your Ferrite app | Mounts `poppy-oauth` on your app's own canonical origin |
+
+## Option 1: Bring your own external issuer
+
+If your product already uses an external OAuth 2.1 provider that supports `private_key_jwt`, PKCE `S256`, RFC 8707 `resource` indicators, and RFC 7009 revocation, configure `PoppyAuth::External`:
+
+```rust filename="src/api.rs"
+use crate::agent_ready::poppy::{PoppyAuth, PoppyConfig, ScopeChanges, ScopeSpec};
+
+let mut cfg = PoppyConfig::signed_out("Northlight Studio");
+cfg.auth = PoppyAuth::External {
+    issuer: "https://auth.northlight.example".into(),
+    emit_issuer_in_poppy: false,
+    scopes: vec![
+        ScopeSpec::new("bookings:read", "Read your bookings", ScopeChanges::None, true),
+        ScopeSpec::new("bookings:write", "Book and cancel classes", ScopeChanges::Irreversible, true),
+    ],
+    extra_authorization_servers: Vec::new(),
+};
+```
+
+`agent-ready` publishes your issuer in `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp`, and emits `auth.scopes` and `auth.scope_hints` in `/.well-known/poppy.json`. Verify incoming access tokens against your external issuer's JWKS before admitting `PoppyExposure::SignedIn` operations.
+
+## Option 2: Run a per-app issuer with `poppy-oauth`
+
+Install `poppy-oauth` when you want your application to act as its own isolated Poppy 1.0 OAuth 2.1 authorization server with no external identity vendor:
+
+```bash
+ferrite add poppy-oauth
+```
+
+Declare the printed module in `src/lib.rs`:
+
+```rust filename="src/lib.rs"
+pub mod agent_ready;
+pub mod crypto;
+pub mod http_change_password;
+pub mod http_query;
+pub mod poppy_oauth;
+```
+
+### Configure the issuer from your `PoppyConfig`
+
+Build an `OAuthServerConfig` directly from your `PoppyConfig` and an injected signing secret from `ferrite.json`:
+
+```rust filename="src/oauth.rs"
+use crate::agent_ready::poppy::{PoppyConfig, ScopeChanges, ScopeSpec};
+use crate::poppy_oauth::OAuthServerConfig;
+
+pub fn oauth_config(signing_secret: Vec<u8>) -> OAuthServerConfig {
+    let poppy = PoppyConfig::with_self_hosted_oauth(
+        "Northlight Studio",
+        vec![
+            ScopeSpec::new("bookings:read", "Read your bookings", ScopeChanges::None, true),
+            ScopeSpec::new("bookings:write", "Book and cancel classes", ScopeChanges::Irreversible, true),
+            ScopeSpec::new(
+                "poppy:browser-sign-in",
+                "Sign in to the website in a browser",
+                ScopeChanges::Irreversible,
+                true,
+            ),
+        ],
+    );
+
+    OAuthServerConfig::from_poppy(
+        "https://studio.example",
+        vec![
+            "https://studio.example".into(),
+            "https://studio.example/mcp".into(),
+        ],
+        signing_secret,
+        poppy,
+    )
+}
+```
+
+### Wire the OAuth endpoints
+
+Implement `poppy_oauth::OAuthStore` over your application's Ferrite Store binding (the package includes `MemoryOAuthStore` for tests) and route each endpoint:
+
+| Route | Handler | Purpose |
+| --- | --- | --- |
+| `GET /.well-known/oauth-authorization-server` | `authorization_server_metadata(&cfg)` | RFC 8414 metadata listing `protected_resources` and `client_id_metadata_document_supported: true` |
+| `POST /oauth/par` | `handle_par` | Pushed Authorization Request (RFC 9126) with `private_key_jwt` and PKCE `S256` |
+| `GET /oauth/authorize` | `handle_authorize_get` | Renders the user consent page showing the agent's verified name, domain, requested scopes, and anti-phishing warning |
+| `POST /oauth/authorize` | `handle_authorize_post` | Issues a single-use authorization code and redirects with RFC 9207 `iss` |
+| `POST /oauth/token` | `handle_token` | Exchanges `authorization_code` or rotating `refresh_token` for audience-bound access tokens |
+| `POST /oauth/revoke` | `handle_revoke` | RFC 7009 immediate grant-family revocation |
+| `GET` / `POST /oauth/connected-agents` | `handle_connected_agents_get` / `handle_connected_agents_disconnect` | Account Settings page where signed-in users inspect and disconnect connected personal agents |
+
+At protected API and MCP endpoints, call `poppy_oauth::verify_access_token` with the exact expected resource (`https://studio.example` for REST APIs, `https://studio.example/mcp` for MCP):
+
+```rust filename="src/oauth.rs"
+let token = crate::poppy_oauth::verify_access_token(
+    &cfg,
+    authorization_header,
+    "https://studio.example/mcp",
+    dpop_header,
+    &req.method,
+    "https://studio.example/mcp",
+    &store,
+    now_ms,
+)?;
+```
+
+## Security and failure semantics
+
+- **Audience isolation (RFC 8707)**: a token minted for `https://studio.example` is rejected at `https://studio.example/mcp` and vice versa. Personal agents obtain a resource-specific token via `refresh_token` with a `resource` parameter and optional downscoping.
+- **Refresh token rotation and reuse detection**: every `refresh_token` grant rotates the token nonce; presenting an already-rotated refresh token revokes the entire grant family immediately.
+- **Immediate revocation (RFC 7009)**: revoking a token at `POST /oauth/revoke` or disconnecting an agent from `/oauth/connected-agents` invalidates all outstanding access tokens in that grant family on the next `verify_access_token` check.
+- **Replay protection**: `private_key_jwt` client assertions (`aud == issuer`, lifetime at most 5 minutes) and authorization codes are burned single-use through `OAuthStore::burn_once`.
+- **Optional sender-constrained tokens (DPoP)**: set `require_dpop: true` on `PoppyAuth::SelfHosted` to require RFC 9449 ES256 `DPoP` proofs bound by JWK thumbprint (`jkt`) at both the token endpoint and protected resources.
+- **Signing secret**: supply at least 32 bytes of high-entropy secret material from `required_secrets` in `ferrite.json`; never hardcode the signing secret in source.
+
+## Next steps
+
+- Wire Poppy 1.0 discovery, exposure policies, and `operations` v3 approvals in [Personal Agent Protocol](/developers/personal-agent-protocol/).
+- Review user session cookies and CSRF protection for the `/oauth/authorize` and `/oauth/connected-agents` pages in [Authentication](/developers/authentication/) and [Authorization](/developers/authorization/).
+- Browse all published source packages in [Packages](/developers/packages/).

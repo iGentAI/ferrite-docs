@@ -1,0 +1,84 @@
+---
+title: "Samples"
+description: "Ten Ferrite sample packs for commerce, support, content, IoT, billing, compliance, collaboration, scheduling, workflows, and releases, and the primitive behind each effect."
+section: "Examples"
+order: 2
+---
+
+Each sample pack takes a standard product problem, such as checkout, ticket
+intake, or usage metering, and maps each effect onto a Ferrite primitive. Every
+pack consists of two parts at different levels of execution:
+
+1. One live route served by `ferrite-sample-apps` that admits a request once
+   regardless of retries (with pack 09 as the exception below).
+2. A set of reference files (a workflow definition, a SQL schema, a search
+   index with sample documents, a dashboard definition, and a runbook) that
+   `ferrite-sample-apps` does not load, deploy, or invoke.
+
+This page documents what each live route executes, what remains design
+reference, and how to reproduce the same admission pattern in your own app.
+
+## Sample catalog
+
+| Pack | Live route behavior | Reference files only |
+| --- | --- | --- |
+| 01 Commerce fulfillment | Admits a checkout once: admission marker, Store document, Queue job, and audit entry on a Stream | Inventory reservation, payment wait, fulfillment |
+| 02 Support copilot | Admits a ticket once: marker, Store, Queue, and Streams | Knowledge retrieval, SLA escalation |
+| 03 Content studio | Admits a draft once: marker, Object Storage, Store, and Queue | Editorial review, search, multichannel publishing |
+| 04 IoT incident response | Admits a telemetry reading once: marker, Store, keyed topic on a Stream, and Queue | Classification, runbook dispatch |
+| 05 SaaS billing | Counts a usage event once even on replay: marker, Store, Queue, and Streams | Invoicing, tenant audit |
+| 06 Compliance vault | Admits evidence once: marker, Object Storage, Store, Queue, and Streams | Approval, retention, audit search |
+| 07 Collaborative editor | Admits a plan once, then queues an agent task and a Markdown export behind separate markers: marker, Store, Queue, and Streams | Document-lifecycle workflow, room state, activity search |
+| 08 Booking | Records a slot hold and a booking request, each admitted once per idempotency key: marker, Store, Queue, and Streams. Does not prevent double booking; [`ferrite-booking`](/developers/apps/) handles seat contention | Booking confirmation, scheduling schema, search |
+| 09 Workflow orchestration | Returns `503` on deployment because Ferrite does not admit a private dependency on `ferrite-workflows` | Incident-runbook workflow definition |
+| 10 Release rollout | Admits a release once: marker, Object Storage, Store, keyed topic and audit entry on Streams, and Queue | Approval, progressive release, recovery |
+
+Every admission marker is an atomic conditional commit through APE (atomic
+envelope), the primitive behind [Transactions](/developers/transactions/),
+which turns repeated submissions into a no-op. Every route leaves its Queue job
+in place; `ferrite-sample-apps` runs no worker to drain the queue.
+
+## What to verify in your own app
+
+When you build a pattern from a pack in your own app, verify it with
+`ferrite check` and `ferrite test`, then deploy and read back stored state.
+Structural validation alone does not prove a live deployment.
+
+The SQL schemas, search definitions, and dashboard files are reference material
+only. A Ferrite application cannot bind a relational database, a search index,
+or a dashboard engine: every service in `ferrite.json` is a `store`, `log`,
+`queue`, `ape`, or `blob`. Any pattern you adopt stores its state across those
+five primitives.
+
+## The sample application
+
+`ferrite-sample-apps` serves every pack route under `/samples/`. It is a
+sign-in client of `ferrite-sso`, so deploying it requires a sign-in broker run
+by the same operator (built with `ferrite-sso` and `auth`) that explicitly
+registers the client property. The app reads the broker's origin and shared key
+from its `sso_broker_origin` and `sso_shared_secret` secrets.
+
+Requests follow a consistent HTTP contract:
+
+- Missing or invalid `__Host-ferrite_app_session` cookie returns `401 authentication required` to API clients and redirects browsers to the broker.
+- Replaying an already admitted request returns `"duplicate": true` and performs no additional writes.
+- A missing required field or non-JSON body returns `400` with an `error` field that names the fault.
+- An unregistered path returns `404 unknown sample route`.
+- Retrying a request that is still in flight or failed mid-write returns `409`.
+
+## Use a pattern in your own app
+
+1. Pick the first effect your product needs, usually idempotent request
+   admission.
+2. Declare only the services that effect writes in `ferrite.json`: an `ape`
+   service for the admission marker, a `store` for the document, and a `queue`
+   for downstream work.
+3. Write the handler so a repeated request is a no-op, and test retries,
+   duplicates, and partial failures locally with `ferrite test`.
+4. Add a queue worker if your product needs the downstream stages.
+5. Deploy, then read back the stored state instead of trusting the HTTP reply
+   alone.
+
+Continue with [Apps](/developers/apps/) for complete applications with browser
+UIs, sign-in, and customer-facing agent tools, or
+[Transactions](/developers/transactions/) for atomic conditional commits.

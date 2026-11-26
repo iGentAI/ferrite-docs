@@ -1,0 +1,145 @@
+---
+title: "What bounds an app your agent writes"
+shortTitle: "What bounds your app"
+description: "How Ferrite isolates applications written by coding agents, layer by layer: declared capabilities, OS containment, prepaid spend bounds, and what stays in your code."
+section: "Get started"
+order: 3
+---
+
+Coding agents produce more code than you will ever review line by line, so the
+practical review surface is the boundary the code runs inside. Ferrite enforces
+that boundary by default for every application: the runtime injects handles only
+for the services, routes, and outbound destinations listed in `ferrite.json`,
+rejects source that references host files, environment variables, processes, or
+raw sockets, and draws every charge from a prepaid balance. This page traces
+each layer, what you audit before shipping, and what stays outside the
+platform's guarantee.
+
+## The app can reach only what it declared
+
+Every resource an application can touch is listed in `ferrite.json`: stores,
+queues, streams, object storage, routes, and outbound URL prefixes. At runtime
+your code reaches them only through typed handles on `AppContext`, with no
+ambient database credentials and no raw socket access. Outbound HTTP passes
+through the gateway exclusively to declared destinations, and every attempt is
+recorded.
+
+Your security review starts with that one file. Reading `ferrite.json` shows the
+entire external reach of the agent's code; any undeclared host is refused at the
+gateway ([Secrets & Egress](/developers/secrets-egress/)). Secret values live
+outside the manifest, as the next section explains.
+
+## Your app holds its secrets
+
+Secrets are write-only through the management surface: listings return names
+only, and an updated secret reaches the app on its next deploy. The running
+application does receive the plaintext value so it can authenticate to declared
+destinations. Because application code holds that value in memory, a bug can
+still log it, return it in an HTTP response, or write it to storage, and nothing
+binds a secret to a single destination. Set secrets with `ferrite secrets set`
+or the MCP `set_secret` tool, never in source
+([Secrets & Egress](/developers/secrets-egress/)).
+
+## What the account can spend
+
+Every charge draws from the account's prepaid balance, and any deploy that the
+balance cannot cover is refused (`INSUFFICIENT_CREDIT` in the CLI,
+`InsufficientCredit` in MCP). Run `ferrite cost` (MCP: `estimate_cost`) to check
+the balance, the deploy fee, and projected monthly costs at current rates; it
+charges nothing and deploys nothing.
+
+When a funded account hits zero, its applications stop and remain preserved for
+30 days before permanent deletion with their data. Trial accounts cannot be
+funded and suspend as soon as their credit runs out. Because the same cutoff
+that bounds spend takes live traffic down, keep an eye on the balance for
+production services
+([Understand usage and credits](/kb/guide/usage-and-credits/)).
+
+## Checks filter; containment is the boundary
+
+Before building, the platform validates both the manifest and the Rust source.
+Admission allows one dependency (`ferrite-app`), bans `unsafe` code, refuses
+build scripts and procedural macros, and rejects direct references to host
+networking, files, processes, environment variables, or system clocks. The
+platform compiles the crate itself with `unsafe` forbidden by its own compiler.
+Run the local checks before deploying:
+
+```bash
+ferrite check --json
+ferrite test
+```
+
+`ferrite check` runs the platform's static rule families locally and prints each
+violation with its reason; [CLI Commands](/developers/cli-commands/) lists what
+it checks. Local results are advisory because local and remote gates can
+disagree; `ferrite check --remote` queries the platform gate directly for the
+authoritative verdict.
+
+Static checks are a pre-build filter, while OS containment enforces the runtime
+boundary. Any static filter can miss an unexpected form of code, so what a
+running instance can actually do is settled by the host sandbox.
+
+In required containment mode, Ferrite's application host launches each instance
+under its own unprivileged user ID drawn from a pool so two applications on the
+same machine never share a UID, with all capabilities dropped and `NO_NEW_PRIVS`
+set. The process runs inside private mount, process, and network namespaces with
+no network route of its own, behind a system-call filter that denies operations
+such as mounting and tracing, and inside a cgroup with hard memory and CPU
+limits. If the host cannot apply those bounds, the process does not start.
+Declared outbound traffic passes only through relays the host holds open to
+those exact destinations.
+
+## What a wrong line can and cannot do
+
+| The code tries to | What happens |
+| --- | --- |
+| Open a socket, read a file or environment variable, or spawn a process | Admission rejects it by name before compilation, and the platform compiler forbids `unsafe` code unconditionally |
+| Bypass static checks with an unrecognized construct | Containment blocks it: dropped capabilities, private mount, process, and network namespaces with no route, and a system-call filter |
+| Pull in another crate | Refused: `ferrite-app` is the only allowed dependency, and build scripts and procedural macros are refused |
+| Call an outside service it did not declare | Refused at the gateway, and the attempt is recorded |
+| Read another application's data | Refused: every service checks a signed capability token for the target namespace, and each app receives tokens only for its own bindings |
+| Exhaust its memory or CPU | Only that instance is killed or throttled, and the host restarts it |
+| Send data to a destination it declared | Allowed: declaring the destination grants that permission |
+| Show one user another user's record | Allowed: user authorization lives in your application code |
+| Write a secret into its own logs | Allowed: the running code holds the secret value |
+
+## Sign-in and authorization stay in your code
+
+Ferrite has no managed authentication layer. Add sign-in by vendoring the `auth`
+source package with `ferrite add auth`, which adds provider sign-in and an
+access list directly to your crate
+([Authentication](/developers/authentication/)). Sign-in establishes who the
+caller is; your handlers decide who can view an order or administer a calendar
+([Authorization](/developers/authorization/)). Agent-facing surfaces such as MCP
+apply the same authorization checks, because server-side MCP does not inherit a
+browser cookie ([Agent-ready apps](/developers/agent-native-apps/)).
+
+## A crashed worker does not drop queued work
+
+Queues lease work and redeliver it if a worker dies, and transactions commit all
+participating keys atomically or commit none ([Queues](/developers/queues/),
+[Transactions](/developers/transactions/)). Write queue handlers to be
+idempotent so redelivered messages do not apply twice. Run
+`ferrite dev --chaos <secs>` to kill the local app on a timer and verify your
+recovery path.
+
+## You can look before you ship
+
+Use [logs](/developers/logs/) to trace an operation across your handlers, and
+create [state forks](/developers/environments/#state-forks) to test an agent's
+changes against an isolated copy of live application data before shipping.
+
+## What this does not promise
+
+- Code correctness remains yours. An application can still misuse authority it
+  declared through a faulty business rule, a missing authorization check, or
+  sending customer data to an allowed outbound host.
+- Per-user authorization stays in your handlers. The platform enforces service
+  bindings and egress prefixes; it has no view of which user owns which record.
+- Running code holds its secret values in memory, so a buggy handler can leak
+  them through logs, responses, or stored values.
+- Memory and CPU limits protect neighboring applications on the shared host. An
+  instance that exhausts its own memory restarts, and an account whose balance
+  reaches zero stops its apps.
+- Stored data relies on the cloud provider's disk encryption; there are no
+  per-application encryption keys.

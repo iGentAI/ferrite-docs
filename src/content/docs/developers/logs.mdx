@@ -1,0 +1,72 @@
+---
+title: "Logs and observability"
+description: "Inspect captured stdout and stderr tails, account notifications, structured tracing events, and gateway usage totals, and understand what each record retains."
+section: "Observe"
+order: 1
+---
+
+Ferrite exposes three operational signals across the CLI, MCP tools, and the Dashboard: a short stdout and stderr tail per application, an account notification feed, and request telemetry from the gateway. Propagate the gateway's correlation ID across handlers, background jobs, and outbound calls so one identifier ties a failed response to every log line it triggered.
+
+## Read application logs
+
+Fetch recent stdout and stderr for an application you own:
+
+```bash
+ferrite logs my-app
+```
+
+Replace `my-app` with your deployed application name. Ferrite captures stdout and stderr from each instance and retains a short ring buffer for live debugging:
+
+- The newest 20 lines from each running instance on every worker host.
+- The last 20 lines from up to three ended instance sets per worker host, with each line truncated at 1 KiB.
+- A summary line after each ended set reporting when it stopped, why it ended, and how many processes exited.
+
+That tail shows why a request failed or why an instance crashed. It is a bounded ring buffer with no full-text search, no time-range queries, and no multi-day retention; older lines drop as new output arrives. An empty or short tail never proves an event did not happen. Persist orders, state transitions, and audit records in your application's own storage.
+
+The MCP `logs` tool reads the same tail in chronological order (newest last). It returns the last 100 lines by default; pass `tail` to adjust the count, or `tail: 0` for every retained line. `ferrite logs` always requests the default count and takes no flag to change it. To distinguish an unexpected crash restart from a deploy, call the MCP `status` tool: it reports each worker's active serving set (a new set ID indicates a new process), process start times, unexpected exits, and recently ended sets.
+
+## Read account notifications
+
+Call the MCP `notifications` tool to read account events you did not initiate: credited payments, applications stopped when your balance hit zero, deploys refused for insufficient credit, or applications parked after crash loops. Pass `limit` to fetch the newest N entries (default 50; `0` returns the entire feed). Each account keeps at most 100 entries. When the feed fills, Ferrite evicts the oldest `info` entry first, then the oldest `warn`, then the oldest `error`.
+
+Your application can write to the same feed with `ctx.notify(severity, kind, body)` or `ctx.notify_deduped` (with a deduplication key) so application-level alerts surface beside platform events. See [Rust SDK](/developers/rust-sdk/#platform-utilities).
+
+To receive push deliveries instead of polling, register an HTTPS webhook with `set_notify_channel {url}`. The platform returns the signing secret once. Each webhook delivery is an HTTP POST signed with HMAC-SHA256 over `{t}.{payload}` (the same signature scheme Stripe uses), delivered at least once and resumed from the last acknowledged position after interruptions. A new channel delivers events from the moment it is registered with no backlog. Inspect delivery status with `notify_channel` and remove the webhook with `delete_notify_channel`; removing the channel leaves the notification feed intact.
+
+## Write structured events
+
+The gateway assigns every HTTP request a correlation ID. Your handler receives it in the request envelope as `correlation_id`, and the gateway sets it on the HTTP response as `x-correlation-id`. Log that ID with every operation the request triggers, including queued jobs and outbound calls, so the value a user copies from a failed response maps directly to the matching lines in the tail.
+
+Use `ferrite_app::tracing` without adding any dependency. The SDK installs a subscriber that emits events at `info` and above to stderr as plain text, which `ferrite logs` and MCP `logs` capture:
+
+```rust
+use ferrite_app::tracing;
+
+tracing::info!(
+    operation = "reserve_inventory",
+    outcome = "committed",
+    "Inventory reservation completed"
+);
+```
+
+Along with `correlation_id`, include a tenant-safe resource identifier, duration, and reason class when reconstructing an operation. Log failed provider attempts separately from subsequent successful retries so a final success does not mask repeated timeouts.
+
+Keep secrets out of logs. Control-plane secret APIs are write-only and outbound egress is locked to declared destinations, but the running process holds the decrypted secret value and the platform does not scrub stdout or stderr. Anyone holding a credential for the account, including a coding agent, can read the log tail. Never log passwords, session cookies, bearer tokens, provider keys, reset links, or signed identity assertions. See [Secrets & Egress](/developers/secrets-egress/#what-this-does-not-stop) for the full boundary. Record business decisions in application storage or an audit stream instead of stderr.
+
+## Read usage telemetry
+
+The MCP `usage` tool returns cumulative totals for an application since `first_ms`: requests, errors, bytes served, average and peak latency, and serving credit charged, aggregated from gateway response events. Because `usage` returns a single cumulative snapshot, inspect daily traffic in the Dashboard (see [Analytics and usage](/developers/analytics/)) or diff `usage` snapshots taken before and after a deploy to measure change over time. Keep consistent operation names and correlation IDs in your logs so application output matches gateway totals.
+
+Missing telemetry never proves zero traffic, and neither logs nor gateway counters serve as a billing ledger.
+
+## Investigate a failed operation
+
+1. Record the failing request, its `x-correlation-id`, and the time window.
+2. Check the running generation with `ferrite status` and the deploy history with `ferrite rcs log` (MCP: `rcs_log`, where every deploy is a commit).
+3. Search the log tail for the correlation ID, inspect `status` for restarts, unexpected exits, or a parked state, and call `dead_letters` on any queue whose messages exhausted their delivery budget.
+4. Reproduce locally with `ferrite dev`, or create a [state fork](/developers/environments/#state-forks) when the failure depends on live stored data.
+5. Apply the fix, run application tests, deploy, and verify the original request flow against the live host.
+
+Your coding agent can gather all of these signals through MCP. For read-only triage, restrict it to `logs`, `status`, `usage`, and `notifications`. Before replaying traffic in a state fork, inspect which services the fork reports as `forked`: any service marked `shared` points directly at the original application's data, and outbound HTTP calls made by a fork hit real external endpoints.
+
+See [Deployments](/developers/deployments/) and [Analytics and usage](/developers/analytics/).

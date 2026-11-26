@@ -1,0 +1,189 @@
+---
+title: "Quickstart"
+description: "Create a Ferrite web app, run it locally with live reload, verify it against platform rules, and deploy it."
+section: "Get started"
+order: 2
+---
+
+import AgentSetup from "../../../components/AgentSetup.astro"
+
+<AgentSetup firstApp />
+
+The setup prompt scaffolds the CLI's live-counter example and checks that an
+increment survives a reload. If you already have a Ferrite account, open
+**Create your first app** in the dashboard to bind the prompt to that account;
+otherwise setup opens a trial account for you.
+
+To run the workflow yourself from a terminal, scaffold a source-deployable Rust
+web app from the `webapp` template, which is the same live-counter project. It
+includes static HTML, an API route, server-sent events, a health endpoint, and
+`ferrite.json`. When you start an HTML application of your own, use the `alloy`
+template instead (`ferrite new alloy <name>`), which `ferrite new --help`
+recommends; the [CLI guide](/developers/cli/#get-started) compares all three
+templates.
+
+## Prerequisites
+
+- A Rust toolchain for local compilation (`ferrite check`, `ferrite test`, and
+  `ferrite dev`). Install it with
+  `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh` and open a
+  new terminal. `ferrite deploy` runs without a local toolchain because the
+  platform validates and compiles the source remotely.
+- The Ferrite CLI, installed via the [CLI guide](/developers/cli/).
+- A Ferrite account for deployment. Local scaffolding, checks, and tests need no
+  account, and the docs, package downloads, and MCP discovery are public.
+
+## Create the app
+
+```bash
+ferrite new webapp hello-ferrite --with-tests
+cd hello-ferrite
+```
+
+The project is self-contained, with the `ferrite-app` SDK and local test runtime
+vendored under `vendor/` and a deployment-ready `ferrite.json`. You edit these
+files:
+
+```text
+hello-ferrite/
+├── Cargo.toml
+├── ferrite.json
+├── site/
+│   └── index.html
+├── src/
+│   ├── lib.rs
+│   └── main.rs
+└── tests/
+    └── smoke.rs
+```
+
+The scaffold also writes `README.md`, `AGENTS.md` (the
+[agent brief](/developers/agent-brief/) followed by the template's API card), a
+`CLAUDE.md` that imports it, `rust-toolchain.toml`, `.gitignore`, and a
+gitignored, owner-readable `ferrite.local.toml` for local secrets.
+
+Put application logic in `src/lib.rs` and leave `src/main.rs` as the process
+entry point. The CLI regenerates `src/__ferrite_site.rs` from `site/index.html`
+before every check, build, test, and deploy, so edit the HTML and leave the
+generated module alone.
+
+## Run the development server
+
+```bash
+ferrite dev
+```
+
+Ferrite prints the local URL first, then reports content sync and compiler runs:
+
+```text
+▲ Ferrite <version>
+- Local:        http://127.0.0.1:8787
+- Application:  hello-ferrite
+- Project:      /path/to/hello-ferrite
+
+✓ Starting...
+✓ Refreshed web content (1 file) in 0ms
+○ Compiling Rust application ...
+✓ Compiled Rust application in 1.9s
+○ Watching for changes (press Ctrl-C to stop)
+✓ Ready in 1.9s
+ready: http://127.0.0.1:8787
+```
+
+The `ready:` line appears once the app has answered its first request. If port
+8787 is already bound, the gateway selects the next free port, prints it, and
+records it in `.ferrite/dev.json`.
+
+Open the local URL. The gateway listens on `127.0.0.1` only, so it ignores
+requests from other machines. Editing `site/index.html` regenerates
+`src/__ferrite_site.rs`, triggers a quick rebuild and restart, and refreshes the
+browser. Editing `src/lib.rs` rebuilds and restarts the app while keeping local
+service state intact.
+
+## Check and test
+
+```bash
+ferrite check
+ferrite test
+```
+
+`ferrite check` validates the manifest, admission rules, and Rust source.
+`ferrite test` runs `cargo test` and fails if none of your tests executed. Pass
+`--json` to `check` for a structured report, or to `dev` for newline-delimited
+lifecycle events when an agent or CI job reads the output. Run
+`ferrite check --remote` for the platform gate's authoritative verdict.
+
+## Deploy the app
+
+```bash
+ferrite account
+ferrite cost --instances 1
+ferrite deploy
+```
+
+Use the account verified during setup. If you skipped agent setup and have no
+account yet, run
+`ferrite login --ephemeral --endpoint https://mcp.ferrite.cloud/mcp` to open a
+48-hour trial account with $50 of credit (one instance per app, 256 MiB of
+memory, half a CPU) and deploy directly from it. If an existing login expired or
+cannot connect, repair it instead of creating a second account.
+
+A trial account expires 48 hours after it opens, and any running apps are
+withdrawn with it. To keep the app and its data at the same address permanently,
+open the private claim link (`ferrite claim --link`, or the MCP `claim_url`
+tool), sign in, and choose **Keep this as my account** or **Move it into** an
+account you own; this computer's login follows. A script can transfer the apps
+itself with the [CLI claim procedure](/developers/cli-commands/#ferrite-claim) or the
+[MCP-only transfer](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
+Then open the original URL and verify the data is still there. Durable accounts
+have no 48-hour limit and receive a one-time $50 welcome credit.
+
+`ferrite cost` (MCP: `estimate_cost`) checks your prepaid balance, the deploy
+fee, and each app's projected monthly rate at current pricing without charging
+or deploying. There is no plan fee and no seat fee, and a small always-on app
+costs roughly $8 a month. Pass `--instances` to match your target replica count.
+`ferrite account` prints the balance alone, and `ferrite statement` lists the
+underlying charges and top-ups.
+
+Every charge draws from the prepaid balance, and a deploy the balance cannot
+fund fails with `INSUFFICIENT_CREDIT`. The MCP `billing_portal` tool returns a
+top-up link. When a funded account hits zero, its applications stop and are kept
+for 30 days before permanent deletion with their data. Trial accounts cannot be
+funded and suspend as soon as their credit runs out. Account-wide spending
+ceilings are tracked separately in the Dashboard.
+
+`ferrite deploy` runs your source through admission and an attested remote
+build, then prints the deployed host once the new generation is running. An
+unchanged project submits nothing on a repeat deploy; pass `--force` to rebuild
+anyway. Expect builds to take three to eight minutes because the platform
+compiles the checked source itself. If your shell disconnects while a build is
+running, `ferrite deploy resume` reattaches, and
+`ferrite deploy status --attempt <id>` or `ferrite deploy wait --attempt <id>`
+tracks a printed attempt ID. Run `ferrite host` to print the app's address
+before the first deploy.
+
+`ferrite preview` commits the current source and deploys it to a separate host
+under the same admission and build checks, without a test gate or charge, and
+removes it after two hours. The command prints a `build_id` and exits while the
+build runs; follow it with the MCP `build_status` tool until it reports
+`PreviewDeployed`, and wait for that build to finish before starting another
+preview ([CLI Commands](/developers/cli-commands/#ferrite-preview)).
+
+To test a change against live data without touching the deployed app, run
+`ferrite fork <copy>` to clone the app, its code, and all of its state onto a
+separate host. Pass `--as-of <time>` to fork from a past point within the
+platform's retention window (14 days on Ferrite Cloud). Deploy a working copy
+whose `ferrite.json` names `<copy>` to change the fork's code.
+
+## What you have now
+
+- A local gateway with static content, API routes, SSE, and live reload.
+- Persistent local service state stored under `.ferrite/state`.
+- A `ferrite.json` manifest declaring services, bindings, routes, compute, and
+  any outbound egress destinations you add later.
+- A `ferrite preview` path for unverified, temporary deployments.
+- One application contract shared by local terminal runs and coding agents.
+
+Next, explore the [Ferrite CLI](/developers/cli/), add a
+[Queue](/developers/queues/), or
+[serve the app to your customers' assistants](/developers/agent-native-apps/).

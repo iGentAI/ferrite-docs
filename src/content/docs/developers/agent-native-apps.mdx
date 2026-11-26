@@ -1,0 +1,124 @@
+---
+title: "Agent-ready apps"
+description: "Expose discovery files, Markdown pages, OpenAPI, MCP tools, an A2A card, and machine-readable pricing from one Surface declaration through your existing handlers."
+section: "Assistants & MCP"
+order: 4
+---
+
+Software acting on your customers' behalf needs a reliable way to find, read, and call your application without scraping HTML or receiving extra privileges. With the `agent-ready` package, you declare your pages and operations once in a `Surface`, and the package serves every standard agent-facing format from that single source: discovery files, Markdown page twins, an OpenAPI catalogue, MCP tools, an A2A agent card, a skills index, and machine-readable pricing.
+
+`agent-ready` never executes business logic on its own. Every incoming MCP tool call is routed into the handler closure your application provides. Point that closure at the same domain functions your HTTP routes invoke so human visitors and external assistants pass through identical sign-in, ownership, and role checks.
+
+This reference covers what `agent-ready` serves and what stays in your application code. Follow [Build for agents](/developers/build-for-agents/) for a step-by-step walkthrough. For the coding agent that builds and deploys your app, see [Agent setup](/developers/plugin/), and for an agent running inside your product, see [Agents](/developers/agents/).
+
+## Add the package
+
+```bash
+ferrite add agent-ready
+```
+
+Before signing in to Ferrite on a machine, pass `--registry https://packages.ferrite.cloud/registry.json`. See [Packages](/developers/packages/) for registry and vendoring details.
+
+Declare one `Surface` with your application's identity, canonical origin, human pages, routes, operations, JSON schemas, and `read_only` or `idempotent` traits. Invoke the `agent-ready` handler ahead of application-specific routing.
+
+Your `Surface` controls what assistants see, while `ferrite.json` controls which requests and headers reach your app. Neither file is derived from the other, so keep both in sync. Configure a route that covers the agent-facing paths and forward the headers the package reads:
+
+- Without `accept`, Markdown versions work only at `.md` paths and `?format=md`, and content negotiation on page URLs is unavailable.
+- Without `origin`, the MCP endpoint cannot reject cross-origin requests.
+- Without `mcp-method` and `mcp-name`, the package cannot verify that request headers match the JSON-RPC body.
+
+A catch-all route that forwards the headers needed by both the package and your own handlers looks like this:
+
+```json filename="ferrite.json (excerpt)"
+{ "prefix": "/", "binding": "requests", "kind": "api",
+  "forward_headers": ["accept", "cookie", "idempotency-key", "mcp-protocol-version",
+                      "mcp-method", "mcp-name", "origin", "sec-fetch-site"] }
+```
+
+`agent-ready` reads `accept`, `origin`, `mcp-protocol-version`, `mcp-method`, and `mcp-name`; the remaining headers in that list (`cookie`, `idempotency-key`, `sec-fetch-site`) serve your own application handlers. Return every response header the package produces, including `Vary: Accept`.
+
+## Publish the discovery set
+
+| Path | Purpose |
+| --- | --- |
+| `/.well-known/change-password` | Password-change discovery: a redirect to your app's password page, or `404` when your app has none |
+| `/robots.txt` | Crawler policy and discovery links |
+| `/sitemap.xml` | Canonical human and machine URLs |
+| `/llms.txt` | Concise app orientation and core links |
+| `/llms-full.txt` | Broader Markdown context |
+| `/index.md` or `Accept: text/markdown` | Clean Markdown page representation |
+| `/.well-known/api-catalog` (alias `/openapi.json`) | HTTP operation schemas (OpenAPI 3.1) |
+| `/.well-known/agent-card.json` | App identity, skills, and interfaces |
+| `POST /a2a` | A2A JSON-RPC endpoint referenced by the agent card's `url` |
+| `/server.json` and `/.well-known/mcp/server-card.json` | MCP registry manifest |
+| `/.well-known/agent-skills/index.json` | Agent Skills index; the projected skill is `/.well-known/agent-skills/use-this-app/SKILL.md` |
+| `/pricing.md` | Operation prices in Markdown |
+| `/.well-known/agent-readiness` | The app's own report of what it declares |
+| `POST /mcp` | Stateless MCP tools |
+| `/.well-known/poppy.json` | Optional Personal Agent Protocol (Poppy 1.0) discovery document when `PageSource::poppy()` is implemented |
+| `/.well-known/oauth-protected-resource` (and `.../mcp`) | RFC 9728 Protected Resource Metadata for Poppy OAuth issuers (`404` when signed-out) |
+| `/poppy/openapi.json`, `/poppy/tasks`, `POST /poppy/feedback` | Exposure-filtered OpenAPI, Agent Skills discovery (`0.2.0`) + excluded tasks, and agent feedback intake |
+
+Generate every server-side format from the same authored pages and operation declarations so a parallel agent API never drifts from your app. WebMCP browser tools are the one piece the package does not generate: register them in your page's JavaScript with the same operation names and input schemas, and have each tool call your existing HTTP routes. See [WebMCP & OpenAPI](/developers/webmcp-openapi/).
+
+Every discovery document embeds your origin. When your app answers on a host other than the default origin in `Surface` (such as a custom domain), build the surface per request with `Surface::served_at(verified_host)`. Always pass the gateway-attested `verified_host` from the request, never a caller-supplied header, so discovery links resolve to the host the request arrived on.
+
+An operation with a non-zero `price_micros` appears in the OpenAPI catalogue with `x-price-usd-micros` and a `402` response. The `x402` module implements x402 version 1: it builds payment requirements, decodes the `X-PAYMENT` header, and verifies that the payment matches the operation. Settlement stays in your application. Send the facilitator request built by the module to your payment facilitator over a declared outbound egress destination, store the facilitator credential as a secret, and decide in your handler when to answer `402`.
+
+## Keep one authorization boundary
+
+Public catalogue tools can allow anonymous callers. Orders, tickets, evidence, staff schedules, and administrative actions require the same subject, tenant, role, ownership, and step-up checks as your web interface. A server-side MCP request carries no browser session cookie, and WebMCP must never copy that cookie into an assistant's context. See [Authorization](/developers/authorization/#assistants-acting-for-a-person) for how to authorize assistants acting for a person.
+
+## Password-change discovery
+
+`agent-ready` answers `/.well-known/change-password` so password managers and browsers can locate your password-change flow. Because Ferrite has no platform password store, return the same-origin path of your app's password page from `PageSource::change_password_url()`. If your app stores no passwords, leave the default (`None`) so the route returns `404`. Apps that authenticate through OAuth providers via `ferrite add auth` hold no passwords and should keep the default. Call `agent_ready::well_known::handle_h` before any catch-all route and preserve every header it returns.
+
+A coding agent using `ferrite mcp-serve` can install the package with `local_add` (`package: "agent-ready"`) and apply the returned crate declarations and wiring instructions. After deploying, verify the route with an unauthenticated `GET` (the gateway answers `HEAD` directly with `405`). If your app manages passwords, complete a real password change through the target page in a browser; local configuration alone does not confirm the deployed redirect. Never collect a password in an MCP tool or inside an assistant's context. See [Authentication](/developers/authentication/).
+
+## Map an API operation
+
+```rust filename="src/surface.rs"
+Operation {
+    name: "list_products".into(),
+    method: "GET".into(),
+    path: "/api/products".into(),
+    description: "List products with current price and availability.".into(),
+    input_schema: Some(json!({
+        "type": "object",
+        "properties": { "query": { "type": "string" } },
+        "additionalProperties": false
+    })),
+    output_schema: None,
+    read_only: true,
+    idempotent: true,
+    price_micros: 0,
+}
+```
+
+The MCP tool, OpenAPI operation, and WebMCP registration all delegate to the same `list_products` domain function.
+
+Both traits are advertised to callers: `read_only` appears in the OpenAPI catalogue, MCP tool annotations, and the agent card; `idempotent` appears in `llms.txt`, the OpenAPI catalogue, and MCP tool annotations. `agent-ready` enforces neither trait at runtime. Set `idempotent` to `true` only when your handler returns the original result for repeated requests carrying the same `idempotency-key` header. Reads are naturally retry-safe, while most writes are not. Because `Operation::new` sets `idempotent` to `true` by default, turn it off on any write whose handler does not deduplicate. `method` accepts `GET` or `POST`.
+
+## What the package does not do
+
+The generated files report what your `Surface` declares and never inspect your handler implementation. Nothing verifies that a `read_only` operation avoids writes or that a tool response conforms to `output_schema`; test each served interface directly as shown in [Verify the served behavior](#verify-the-served-behavior).
+
+Several supported formats are still evolving: `llms.txt` is an emerging convention, WebMCP is an emerging browser proposal, and Web Bot Auth is an Internet-Draft. The `x402` module implements version 1 of x402, and the A2A endpoint speaks version `0.3.0`. The MCP face covers stateless core methods (`tools/list`, `tools/call`, discovery) without prompts, sampling, elicitation, or resource subscriptions; see [Which clients can connect](/developers/mcp-servers/#which-clients-can-connect) for supported MCP revisions. Update the package when you want to adopt newer protocol revisions.
+
+Web Bot Auth identity headers are parsed without cryptographic verification. The package reads signature headers so your code can inspect a claimed identity, but it never fetches external key directories or verifies signatures. Treat any declared agent identity as an unverified claim.
+
+Payment handling stops before settlement, as described in [Publish the discovery set](#publish-the-discovery-set). Remote assistants also have no browser session: public operations can answer them, while any operation requiring a signed-in user refuses them unless your app issues and verifies an explicit bearer token.
+
+If your app already serves an MCP endpoint through the `mcp` package, do not mount `agent-ready`'s MCP face as well, or you will expose two separate MCP servers.
+
+## Verify the served behavior
+
+```bash
+ferrite dev
+curl -s http://127.0.0.1:8787/.well-known/agent-readiness
+curl -s http://127.0.0.1:8787/llms.txt
+```
+
+`/.well-known/agent-readiness` summarizes your `Surface` declaration; it never exercises your runtime routes. Call each advertised interface directly, including an MCP `tools/list`, a real `tools/call`, and an OpenAPI route, and verify the live responses.
+
+Continue with [Personal Agent Protocol](/developers/personal-agent-protocol/), [Per-app OAuth (Poppy)](/developers/poppy-oauth/), [WebMCP & OpenAPI](/developers/webmcp-openapi/), and [Apps](/developers/apps/) for complete examples of this pattern.

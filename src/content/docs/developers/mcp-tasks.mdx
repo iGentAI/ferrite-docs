@@ -1,0 +1,277 @@
+---
+title: "MCP Tasks"
+description: "Start long-running tools, keep a task handle, reconnect, provide input, and retrieve the final result."
+section: "Assistants & MCP"
+order: 5
+---
+
+An ordinary MCP tool call ties execution to a single HTTP request. MCP Tasks decouples them: a client starts a long-running tool call, receives a durable handle, disconnects, and returns later to poll progress, answer an input prompt, or fetch the final result.
+
+You will use MCP Tasks in two places on Ferrite. Ferrite's own MCP endpoint (`https://mcp.ferrite.cloud/mcp`), which your coding agent uses to deploy and operate apps, returns a task handle from build-starting tools whenever your client negotiates Tasks; start with [Follow a Cloud build in the Dashboard](#follow-a-cloud-build-in-the-dashboard). Your own Ferrite apps can also expose task-capable tools to their users' assistants through the `agent-ready` package; start with [Add Tasks to your own app](#add-tasks-to-your-own-app) and use the client sections to drive them.
+
+Check that an endpoint advertises Tasks before relying on handles, and follow the cancellation semantics that endpoint defines. Once a Ferrite Cloud build starts, it runs to completion and cannot be cancelled.
+
+## Discover support
+
+Connect using the MCP `2026-07-28` profile. The server's `server/discover` response must advertise `io.modelcontextprotocol/tasks` under `capabilities.extensions`, and your client must include the same capability in its request metadata. Ferrite implements the `2026-07-28` [MCP Tasks protocol specification](https://tasks.extensions.modelcontextprotocol.io/).
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "server/discover",
+  "params": {
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": { "io.modelcontextprotocol/tasks": {} }
+      }
+    }
+  }
+}
+```
+
+List the endpoint's tools, read the target tool's input schema, and invoke it through `tools/call`. A task-capable tool may return either an immediate result (`resultType: "complete"`) or a task handle (`resultType: "task"`), so your parser must handle both shapes.
+
+Authenticate using the endpoint's required credentials. Every task stays bound to the caller that created it and cannot be read from another account.
+
+## Follow a Cloud build in the Dashboard
+
+The fastest way to see Tasks working is against a real build on `https://mcp.ferrite.cloud/mcp` using the CLI commands covered in [Use the CLI](#use-the-cli). Select your Ferrite account and write an `arguments.json` file with the full app name and an immutable source reference:
+
+```json
+{"app":"YOUR_ACCOUNT/YOUR_APP","reference":"YOUR_SOURCE_REFERENCE"}
+```
+
+Start the test run and save its receipt:
+
+```bash
+ferrite tasks call test_ref --arguments arguments.json --receipt test.json
+```
+
+For a fresh build, `test.json` records a `taskId`. Open the app in the [Dashboard](https://dashboard.ferrite.cloud/) while signed in to an account with access to it, open **Builds**, paste the ID into **MCP task ID**, and choose **Track task**. Reloading the resulting URL reopens the same build.
+
+A cached test run may complete inline without creating a task. When a build is running, `ferrite tasks wait test.json` polls the saved handle until it finishes. Inspect the nested tool result's `isError` field to determine whether tests passed, because a completed task can still carry failing test results. Call `build_status` with the build ID for full build diagnostics.
+
+When your client negotiates Tasks, `https://mcp.ferrite.cloud/mcp` returns a task handle from `deploy_source`, `deploy_ref`, `test_ref`, `deploy_release`, `promote`, `rollback_release`, and `fork` whenever the call starts a build. If the build state cannot be read back immediately, the response falls back to an ordinary `BuildStarted` result; poll `build_status` with that build ID instead of resubmitting the tool call. Cloud build task IDs use `ferrite-build-` followed by the build ID. A finished task returns `result.structuredContent.BuildState` with `build_id`, `app`, `state`, `host`, `generation`, `started_ms`, and `finished_ms`, and sets `isError` to `true` for `rejected`, `failed`, `test_failed`, and `pointer_denied`.
+
+Cloud build tasks always run to a terminal state. They cannot be cancelled (see [Request cancellation](#request-cancellation)), and `tasks/update` is refused because builds never ask for input. Their `ttlMs` is `null`: the handle stays readable for as long as `build_status` retains the build.
+
+## Use the CLI
+
+The Ferrite CLI includes the `tasks` subcommands on macOS (Apple silicon), Linux x86-64, and Linux ARM64. Install or update the CLI from the [CLI installation guide](/developers/cli/) and check that the command is present:
+
+```bash
+curl -fsSL https://downloads.ferrite.cloud/install.sh | sh
+ferrite tasks --help
+```
+
+If `ferrite tasks --help` reports an unknown command, re-run the installer to pick up a current build. If your own code needs to drive the lifecycle directly, use the [JavaScript client](#use-the-javascript-client).
+
+The `tasks` commands use your currently selected Ferrite account and endpoint. Verify the active account, then start a tool with an arguments file matching its schema. The CLI writes the receipt before returning the task handle:
+
+```bash
+ferrite account --json
+ferrite tasks call YOUR_TOOL --arguments arguments.json --receipt task.json
+ferrite tasks get task.json
+ferrite tasks wait task.json
+```
+
+Keep `task.json` if you close your terminal; it records the endpoint, account, and task ID. By default `wait` times out after 420 seconds (`--timeout-seconds`, maximum 86400) while the remote task keeps running, so you can invoke `wait` again to resume watching. Tools that finish immediately still write a receipt with state `complete` and their result; `get` and `wait` print that saved result, while `input` and `cancel` refuse it because no active task exists.
+
+When a task pauses for input or needs to stop, use `input` and `cancel`:
+
+```bash
+ferrite tasks input task.json --responses responses.json
+ferrite tasks cancel task.json
+ferrite tasks get task.json
+```
+
+Pass `--allow-form-input` on the initial `tasks call` when calling a tool that requests form input. The CLI persists that preference in the receipt; ordinary builds do not require it. The `responses.json` file holds the `inputResponses` object described in [Supply requested input](#supply-requested-input) with the request keys and schemas returned by the task. If your active account or endpoint changed since you started the task, switch back to the original context before resuming.
+
+## Start and observe work
+
+When a tool creates a task, the server persists the handle before replying with `resultType: "task"`, an opaque `taskId`, the current `status`, timestamps, retention (`ttlMs`), and a suggested polling interval (`pollIntervalMs`). Retention and polling values are chosen by the serving endpoint:
+
+```json
+{
+  "resultType": "task",
+  "taskId": "opaque-task-id",
+  "status": "working",
+  "createdAt": "2026-11-04T09:00:00Z",
+  "lastUpdatedAt": "2026-11-04T09:00:00Z",
+  "ttlMs": 604800000,
+  "pollIntervalMs": 3000
+}
+```
+
+Save the endpoint and `taskId` immediately. Poll progress with `tasks/get` at `pollIntervalMs`, and send the same protocol metadata and authentication headers:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tasks/get",
+  "params": {
+    "taskId": "opaque-task-id",
+    "_meta": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {
+        "extensions": { "io.modelcontextprotocol/tasks": {} }
+      }
+    }
+  }
+}
+```
+
+A `tasks/get` reply returns `resultType: "complete"` alongside the current task fields. Direct HTTP clients must send `MCP-Protocol-Version: 2026-07-28`, set `Mcp-Method` to the JSON-RPC method, and set `Mcp-Name` to `taskId` on task methods. Ferrite's CLI and client libraries populate these headers automatically.
+
+| Status | Client action |
+| --- | --- |
+| `working` | Surface the recorded progress and keep polling. |
+| `input_required` | Inspect `inputRequests` and submit answers through `tasks/update`. |
+| `completed` | Read `result`, including its tool-level `isError` flag. |
+| `failed` | Report the structured execution `error`. |
+| `cancelled` | Report confirmed cancellation. |
+
+A task with status `completed` can still contain a tool-level refusal or error inside `result`. Always check both the task status and the returned tool payload, and keep any application or build ID it returns so you can inspect the full outcome.
+
+## Reconnect and recover
+
+After a network drop or process restart, call `tasks/get` with your saved handle. Resubmitting `tools/call` can launch a duplicate operation. If the initial submission itself lost its response before you received a handle, check the application's idempotency mechanism or operation history before calling the tool again.
+
+Task record retention is governed by `ttlMs`. Platform build tasks report `ttlMs: null` and stay readable while the build remains in `build_status`. Once a task record expires, inspect the application's normal job or deployment history instead; expiration deletes the task record without reversing the underlying work. Keep task IDs, deployment IDs, and CLI attempt IDs distinct, since each identifies a separate record.
+
+## Supply requested input
+
+An `input_required` response includes an `inputRequests` map keyed by request ID. Inspect each entry's method, message, and schema before prompting a user or taking action, and enforce the same consent checks you apply to ordinary elicitation or sampling requests.
+
+Reply with matching result objects inside `inputResponses`. For a form request keyed as `review` asking for an `approved` boolean, pass this parameter object to `tasks/update` along with the usual protocol metadata:
+
+```json
+{
+  "taskId": "opaque-task-id",
+  "inputResponses": {
+    "review": {
+      "action": "accept",
+      "content": { "approved": true }
+    }
+  }
+}
+```
+
+Follow `tasks/update` with `tasks/get`. The update response confirms that the server accepted your input, while the next `tasks/get` shows whether execution resumed, requested more input, or reached a terminal state. Keep the original request keys if you retry an accepted submission. Ferrite ignores answers for keys that were already consumed, so read the subsequent task state before assuming a revised answer took effect.
+
+## Request cancellation
+
+Send `tasks/cancel` with the `taskId`, then keep polling `tasks/get`. Calling `tasks/cancel` records cancellation intent; the task transitions to `cancelled` only after the worker confirms it has stopped. Work already near completion can still finish as `completed` or `failed` before cancellation lands, so handle all three terminal states.
+
+Aborting a client-side wait ends observation without touching the remote job, which is what you want when someone closes a tab or presses Ctrl-C. Call `tasks/cancel` only when the user asks to stop the work itself. Endpoints whose workers cannot abort an active job must document that behavior. On Ferrite's own endpoint, `tasks/cancel` against a build task returns an empty result while the build runs to its terminal state, so `ferrite tasks cancel` exits cleanly while the build finishes. To undo a deployed build, roll it back as described in [Scaling & Releases](/developers/scaling-releases/#recover).
+
+## Add Tasks to your own app
+
+In an app built with the `agent-ready` package, return asynchronous tool names from `PageSource::task_tools()` and dispatch their protocol methods in `PageSource::task_call(method, params)`. The MCP face negotiates the Tasks extension and routes task methods to your handler while serving tool input and output schemas from the same catalog as ordinary tools.
+
+Back `TaskHost` with a `TaskStore` implementation whose writes survive restarts and support strongly consistent compare-and-swap. Derive the task owner from the authenticated request context and enforce that owner on every read and write. Generate task identifiers with at least 128 unpredictable bits. Persist task creation before returning the handle to the caller, and call `claim()` to record dispatch before starting your worker.
+
+If a job may pause for user input, create it with `create_with_capabilities()` using the originating request's client capabilities so `TaskHost` records the negotiated input modes and validates future input requests against them. Tasks created with `create()` permit no input modes.
+
+Workers advance tasks through `request_input()`, `complete()`, `fail()`, and `confirm_cancel()`. Store your application's own job identifier inside the task state so that after a worker restart you can reconcile an already-claimed job before triggering a duplicate side effect.
+
+`TaskHost` caps retention at seven days, limits each task record to 256 KiB, and allows up to 32 pending input requests. Your `TaskStore` adapter owns per-principal quotas and cleanup of expired records. Pick a shorter retention window when your workload allows it, and store large outputs in your application's own storage and return an access-checked reference in the task result.
+
+## Use the JavaScript client
+
+Download the [Tasks client](/examples/mcp-tasks/tasks.mjs) and [command-line sample](/examples/mcp-tasks/client.mjs) into the same directory. Both use native `fetch` on Node.js 22 or newer with no npm packages to install:
+
+```bash
+curl -fsS https://docs.ferrite.cloud/examples/mcp-tasks/tasks.mjs -o tasks.mjs
+curl -fsS https://docs.ferrite.cloud/examples/mcp-tasks/client.mjs -o client.mjs
+```
+
+Set `MCP_ENDPOINT`, `MCP_ACCOUNT_ID`, `MCP_TOKEN`, and `MCP_TASK_TOOL` for your target endpoint and tool, write `arguments.json` matching the tool's input schema, and run the lifecycle:
+
+```bash
+node client.mjs start ./task-receipt.json ./arguments.json
+node client.mjs wait ./task-receipt.json
+node client.mjs get ./task-receipt.json
+```
+
+The sample creates the receipt file exclusively before submitting the call and refuses to reuse an existing receipt path. If the submission fails mid-flight, that reservation record stays on disk so you can inspect the remote app before deciding whether to retry. Run `node client.mjs input ./task-receipt.json ./responses.json` to supply input or `node client.mjs cancel ./task-receipt.json` to request cancellation. `wait` exits with code `2` on `input_required` and code `1` on failure or confirmed cancellation. Pressing Ctrl-C stops polling without cancelling the task, and running `wait` again resumes from the saved receipt.
+
+To drive Tasks from your own JavaScript code, instantiate `TasksClient` with the endpoint, account identity, a header callback for credentials, and an async `saveReceipt` hook. `saveReceipt` completes before `callTool` returns the task handle to your code; keep receipts separate from stored credentials. The snippet below assumes `persistReceipt` and `accessToken` come from your app's storage and auth layer:
+
+```js
+import { TasksClient } from './tasks.mjs';
+
+const client = new TasksClient(endpoint, {
+  accountId,
+  headers: () => ({ Authorization: `Bearer ${accessToken}` }),
+  saveReceipt: persistReceipt,
+});
+
+await client.discover();
+const response = await client.callTool(toolName, toolArguments);
+```
+
+Call `get(taskId)` for a single read and `watch(receipt, { signal, onUpdate })` to poll until `input_required` or a terminal state. Use `update(taskId, inputResponses)` to answer input requests and `cancel(taskId)` to record cancellation intent. Aborting `watch` cancels the in-flight HTTP request and leaves the receipt ready for later reads.
+
+If your codebase already uses the MCP TypeScript SDK, the [official Tasks TypeScript examples](https://tasks.extensions.modelcontextprotocol.io/typescript/) provide a requester SDK; select its `2026-07-28` transport and profile for Ferrite endpoints.
+
+## Use the Rust client
+
+In Rust, the `mcp` source package exposes `call_tool_task`, `get_task`, `update_task`, and `cancel_task` on `McpClient`. Call `call_tool_task` whenever a tool may return a handle, and persist that handle in your application state before scheduling follow-up polls so a worker restart resumes the same task instead of starting a new one. See [MCP servers](/developers/mcp-servers/) for package setup and standard MCP client calls.
+
+## Exercise an application with review
+
+This walkthrough drives an `analyze_text` tool that you implement in your own app: it counts words, Unicode characters, and word frequencies, with an optional approval pause. Build the handler following [Add Tasks to your own app](#add-tasks-to-your-own-app), deploy it with the [deployment guide](/developers/deployments/), point `MCP_ENDPOINT` at your deployment's `/mcp` URL, and confirm discovery and tool schemas before running these commands. To exercise an existing platform tool instead, use [Follow a Cloud build in the Dashboard](#follow-a-cloud-build-in-the-dashboard).
+
+The approval pause requires form-input support on the client. The CLI sample opts in when `MCP_ALLOW_FORM_INPUT=1` is set; applications using `TasksClient` pass `elicitationForm: true` when their UI can render the form and collect an answer.
+
+Supply the authentication your deployed app expects and keep the same token across the session so subsequent calls stay bound to the task owner:
+
+```bash
+export MCP_ENDPOINT=https://YOUR_APP_HOST/mcp
+export MCP_ACCOUNT_ID=text-analysis-demo
+export MCP_TOKEN=YOUR_APP_CALLER_TOKEN
+export MCP_TASK_TOOL=analyze_text
+export MCP_ALLOW_FORM_INPUT=1
+printf '%s\n' '{"text":"Hello hello world","review":true}' > arguments.json
+node client.mjs start ./demo-task.json ./arguments.json
+node client.mjs wait ./demo-task.json
+```
+
+`wait` exits with `input_required` and an `approval` request. Write the response payload, submit it, and wait for completion:
+
+```bash
+printf '%s\n' '{"approval":{"action":"accept","content":{"approved":true}}}' > answers.json
+node client.mjs input ./demo-task.json ./answers.json
+node client.mjs wait ./demo-task.json
+```
+
+The completed result reports three words with a frequency of two for `hello`. To test cancellation, start a second task with a new receipt path, run `node client.mjs cancel ./second-task.json`, and inspect its state with `get` or `wait` using the same `MCP_TOKEN`.
+
+Configure input limits, retention, and per-caller quotas in your application before serving real traffic. If your app also publishes a `task.changed` event, inspect its argument schema and advertised delivery modes before subscribing, pass a `null` cursor to observe future transitions, and authenticate Events requests with the same caller identity.
+
+## Combine Tasks and Events
+
+Events tell you when a task changed, while `tasks/get` remains the source of truth. When a notification arrives, read the saved handle with `tasks/get` and act on that response; a duplicate notification triggers an extra read with no side effect. If the event stream reports a history gap, call `tasks/get` for every task you are tracking. Reject any response whose account or task ID differs from your saved handle.
+
+Selective task notifications and general application events are separate capabilities, so pick the transport the endpoint advertises and fall back to polling when streaming is unavailable. `TasksClient.listen(taskIds, { signal })` consumes selective task notifications from hosts that acknowledge the requested task IDs in `subscriptions/listen` and yields the full task state on each update. A plain HTTP 200 response or an empty acknowledgement does not indicate task-status push support.
+
+Ferrite's Cloud endpoint (`https://mcp.ferrite.cloud/mcp`) serves build Tasks through `get` and `wait` polling without task-status push, so use `watch` in `TasksClient`. See [MCP Events](/developers/mcp-events/) for cursors, webhook verification, and reconnection behavior.
+
+## Track Ferrite deployments
+
+The Ferrite CLI keeps a local deployment journal so you can follow a build across terminal disconnects using its attempt ID:
+
+```bash
+ferrite deploy --dir ./my-app --detach --json
+ferrite deploy status --attempt YOUR_ATTEMPT_ID --json
+ferrite deploy wait --attempt YOUR_ATTEMPT_ID --json
+ferrite deploy resume --attempt YOUR_ATTEMPT_ID --json
+```
+
+Run the follow-up commands from the same project directory and CLI configuration; the CLI looks up the original attempt in its journal instead of submitting a duplicate build. Use these attempt commands when deploying via the CLI, and use Tasks (keeping the `taskId` or `build_id` from the initial reply) when calling Ferrite's MCP tools directly. If a `deploy_source` reply is lost in transit, check `deploy_history` or `build_status` before calling `deploy_source` again, because a second call starts a second build.
+
+See [Deployments](/developers/deployments/) for the attempt commands and [MCP-only Operations](/developers/mcp-only-operations/) for agents operating strictly over MCP.

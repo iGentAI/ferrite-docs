@@ -1,0 +1,275 @@
+---
+title: "Alloy Data & Caching"
+shortTitle: "Data & Caching"
+description: "Cached loaders with three freshness windows, named cache profiles, tag-epoch invalidation, draft mode, bounded reads, and version-skew protection."
+section: "Alloy"
+order: 4
+---
+
+Alloy caches route loaders across visitors using tag epochs in APE and
+freshness envelopes in the key-value store. Advancing a tag invalidates every
+cached entry carrying that tag in one write, while stale-while-revalidate,
+single-flight leases, draft bypasses, bounded scans, and build tags protect
+correctness under concurrency and deploys.
+
+## Cached loaders and per-visitor data
+
+A route loader runs through Alloy's tag-epoch cache. The cache key is derived
+solely from the function id (`fn_id`) and the `args` bytes, even though the
+loader closure can capture anything in scope, including request cookies or the
+signed-in subject. Nothing in the type system stops a closure from capturing
+request-scoped state. If a loader reads per-visitor or request-derived data,
+include that identity (such as the signed-in subject id) in `args`, or skip the
+cache and read the store directly. Otherwise, one visitor's data is stored
+under a shared key and served to other visitors.
+
+## The cached read
+
+```rust filename="src/lib.rs"
+let view = cache
+    .get::<DropView, _, _>(
+        "get_drop",                                   // fn_id
+        id.as_bytes(),                                // args → cache key
+        &["drops".to_string(), format!("drop-{id}")], // invalidation tags
+        CacheLife::Minutes,                           // freshness profile
+        now,                                          // ctx.now_ms()
+        || async move { load_drop(&mut data, &key).await },
+    )
+    .await?
+    .value;
+```
+
+A read moves through three tiers:
+
+1. L1 checks the in-process LRU cache and validates its tag witness against
+   current tag epochs. L1 is bounded by both entry count and byte size and only
+   avoids a round trip; correctness never depends on it.
+2. L2 reads the cache envelope from the store and validates its tag witness
+   with one bounded APE `multi_get`. APE (atomic envelope) is the service
+   behind [Transactions](/developers/transactions/).
+3. On a miss or invalid witness, Alloy runs the loader, writes the envelope
+   with the tag epochs observed *before* the load started, and returns the
+   value.
+
+Capturing the witness before the load is deliberate: if a tag advances *during*
+the load, the new entry's witness fails validation on the next read. Recomputing
+once is safe; serving stale data after an invalidation is not.
+
+`CacheStore::open(ctx)` binds the conventional `cache` store and `tags` APE
+handles, and `CacheStore::new(store, tags)` binds custom handles. The L1 holds
+1024 entries and 32 MiB by default. Any value whose serialized JSON exceeds
+128 KiB is skipped by the cache and evicts the entry it would have replaced, so
+its loader runs on every read; keep cached values under 128 KiB.
+`invalidate(fn_id, args)` removes one entry from both L1 and the store, and
+`with_clock(clock)` timestamps newly loaded entries at write time instead of at
+the `now_ms` passed to `get`.
+
+Every read reports the path it took in `Cached<T>.outcome` (`L1Hit`, `L2Hit`,
+`StaleRefreshed`, `StaleShared`, `StaleRefreshFailed`, `Miss`, `MissShared`, or
+`Bypassed`), so tests can assert exact cache behavior alongside the returned
+value.
+
+## Three windows over one hard TTL
+
+The key-value store offers a single expiry timestamp as a hard cutoff. To
+support three freshness windows (fresh, stale-while-revalidate, and expired),
+Alloy maps only `expire` onto the store TTL and carries `stale` and
+`revalidate` inside the cache envelope for read-time evaluation. Because
+storage removes expired entries automatically, a buggy reader cannot serve an
+expired value.
+
+`CacheLife` specifies three offsets from the write time: when the entry turns
+stale (still servable while triggering a refresh), when a scheduled
+revalidation applies, and when it expires. Built-in enum profiles are
+`Seconds`, `Minutes` (default), `Hours`, `Days`, `Weeks`, `Max`, and
+`Custom { stale_ms, revalidate_ms, expire_ms }`. `validate()` rejects any
+`Custom` profile whose `expire_ms` precedes its `stale_ms`, because
+stale-while-revalidate would stop working without warning.
+
+When a loader composes several cached reads, `CacheLife::shortest` selects the
+shortest window of each pair so the combined payload is never fresher than its
+least-fresh dependency.
+
+## Named profiles
+
+`CacheLife::named(name)` matches Next.js's `cacheLife` names and durations so
+ported code keeps its upstream freshness windows:
+
+| Name | stale | revalidate | expire |
+|---|---|---|---|
+| `seconds` | 0 | 1 s | 1 min |
+| `minutes` | 5 min | 1 min | 1 h |
+| `hours` | 5 min | 1 h | 1 day |
+| `days` | 5 min | 1 day | 1 week |
+| `weeks` | 5 min | 1 week | 30 days |
+| `max` | 5 min | 30 days | effectively never (`u64::MAX / 4` ms) |
+
+An unknown name returns `None` so a typo fails visibly instead of
+falling back to `Minutes`. `CacheLife::profiles_with(name, custom)` checks your
+application-supplied table first, so you can add names such as `"biweekly"` or
+retune `"days"` without forking the lookup:
+
+```rust
+let life = CacheLife::profiles_with("biweekly", &[
+    ("biweekly", CacheLife::Custom {
+        stale_ms: 5 * 60 * 1000,
+        revalidate_ms: 14 * 24 * 60 * 60 * 1000,
+        expire_ms: 60 * 24 * 60 * 60 * 1000,
+    }),
+]);
+```
+
+## Stale-while-revalidate and single-flight
+
+A stale entry is served immediately (`StaleShared`) to every caller except the
+one that wins the refresh lease; that winner runs the loader synchronously and
+returns the fresh value (`StaleRefreshed`). There is no background task.
+Refreshes are single-flighted through a store lease key (create-if-absent with
+a self-expiring TTL): N replicas racing to refresh collapse to one winner, and
+a crashed holder's lock clears automatically when its TTL expires. Cold misses
+use the same lease mechanism: a caller that loses the fill race re-reads once
+and returns the winner's value if already written (`MissShared`), or runs the
+loader itself without blocking. If a refresh fails, Alloy degrades to the stale
+value (`StaleRefreshFailed`) so a failing upstream serves old data instead of
+an error.
+
+## Clock buckets
+
+A payload with a time-derived field (such as a live hold total) becomes stale
+when the clock crosses a boundary without any write advancing a tag. Declare
+`clock_bucket: <ms>` (1 ms to 1 day) on the route and the contract generator
+emits two helpers that compute `now_ms / bucket_ms`:
+`generated::clock_bucket(route_id, now_ms)` (backed by `CLOCK_BUCKETS`) in
+`src/generated/routes.rs`, and `loaderKey(target, nowMs)` in
+`web/src/generated/routes.ts`.
+
+The declaration generates those helpers only; your code applies them on both
+sides. On the server, append `generated::clock_bucket(route_id, ctx.now_ms())`
+to the `args` bytes of the cached read, since the cache key depends only on
+`fn_id` and `args`. On the client, key the query with
+`loaderKey(target, Date.now())` (the generated hooks default to
+`["alloy", "loader", path]` and do not call `loaderKey`) and seed first paint
+under that same key. `loaderKey` also appends the route's declared `query:`
+parameters in declaration order. Leave `clock_bucket` off routes without
+time-derived fields so they do not miss the cache every interval for no gain.
+
+## Tag-epoch invalidation
+
+Alloy invalidates tags directly instead of scanning cached entries. The APE
+table stores one epoch per tag plus a single version guard:
+
+```text
+APE   tagv/@ver     -> u64   the epoch-table version (the single guard key)
+APE   tagv/t/{tag}  -> u64   one epoch per tag
+```
+
+Each cache envelope records the epochs it observed when written (its *witness*).
+On read, Alloy re-reads those epochs in one bounded `multi_get`, and any
+mismatch marks the entry dead regardless of how many entries share that tag.
+Advancing a tag is one write, **O(1) in entry count**. Because `tagv/@ver` sits
+outside `tagv/t/{tag}`, no tag name, including the literal `@ver`, can collide
+with the version guard.
+
+### The budget
+
+One guarded advance carries at most **63 entries** beside the version guard (an
+APE envelope holds 64 entries total). When an action's exact tag set exceeds
+its remaining budget, it must widen to coarser family tags that invalidate a
+superset.
+
+`alloy::page::Invalidation` makes widening explicit:
+`Invalidation::new().reserving(n).family(..).instances(..).widen_to(..).plan()`,
+where `reserving(n)` sets aside entries for the replay marker, the action's own
+APE writes, and its outbox records. `plan()` returns an error if the tags
+exceed the budget with no `widen_to` target declared, or if `widen_to` names a
+family the action did not declare. Its result,
+`InvalidationPlan { tags, widened }`, reports whether widening happened so your
+handler can include it in its own result payload (the wire action reply carries
+only `result` and `advanced`).
+
+Actions declared under `app/` list their permitted tag families statically
+(`tags: ["drops", "drop-*"]`, where a trailing `*` matches any suffix). The
+generated `tag_is_declared(action, tag)` checks whether a tag fits those
+families so your handler can refuse undeclared tags.
+
+### Client invalidation
+
+Every action reply carries its advanced `[tag, epoch]` pairs so the front end
+invalidates affected queries with no extra round trip. In an app with a
+generated contract, generated action hooks pass those pairs to
+`invalidateAdvanced(queryClient, advanced)` in `hooks.ts`, which invalidates
+every cached `["alloy", "loader", path]` query whose payload lists one of those
+tags in `epochs`. Both `loader_reply` and the starter template's `render` leave
+`epochs` empty, and queries with empty `epochs` refetch after every action that
+advances any tag. Populate `LoaderPayload.epochs` with the tags and epochs your
+loader read (using `TagStore::epochs`) so actions refetch only affected
+queries.
+
+## Draft mode
+
+Authors previewing unpublished content must see live data on every request
+without writing draft content into the published cache. Draft mode uses a
+cookie named `__Host-alloy_draft` whose value is an HMAC of `AlloyApp::BUILD`
+under a subkey derived from your app secret with a fixed label:
+
+```rust
+use crate::alloy::draft;
+
+draft::is_enabled(req, key, build)   // constant-time MAC check; key: &[u8]
+draft::enable_cookie(key, build)     // Set-Cookie: Path=/; Secure; HttpOnly; SameSite=Lax
+draft::disable_cookie()              // expired (Max-Age=0)
+```
+
+The secret key must be at least 16 bytes (`draft::MIN_KEY_LEN`). With a shorter
+key or an empty `BUILD` string, `enable_cookie` returns an expired empty cookie
+and `is_enabled` always returns `false` with no error, so draft mode stays off.
+Forward `cookie` on the route so the server receives the header.
+
+Store the key as a secret with
+`printf %s "$KEY" | ferrite secrets set DRAFT_KEY` and read it via
+`ctx.secret("DRAFT_KEY")` (locally, put it under `[secrets]` in
+`ferrite.local.toml`; see [Secrets & Egress](/developers/secrets-egress/)).
+
+Binding the MAC to `BUILD` rotates every outstanding draft cookie automatically
+on every deploy. When draft mode is active, call `CacheStore::get_bypassing`
+with `bypass = true` to skip the cache in **both directions**: skipping only
+reads would write draft data into the published cache, and skipping only writes
+would serve the author stale published content. The outcome is reported as
+`Bypassed`.
+
+Because the cookie is `HttpOnly`, browser script cannot read it. To render a
+draft badge on the client, include the server's `draft::is_enabled` result in
+the page payload; the server recomputes the MAC on every request.
+
+## Bounded reads
+
+`scan_prefix` returns one bounded page and a `more` flag, and ignoring `more`
+turns a truncated aggregate into a confident wrong total. Alloy's
+`Page<T>` requires an explicit choice: follow the cursor or call
+`expect_complete` with the bound that guarantees one page is enough:
+
+```rust filename="src/lib.rs"
+let rows = if more {
+    crate::alloy::page::Page::truncated(rows, 100, Vec::new())
+} else {
+    crate::alloy::page::Page::complete(rows)
+}
+.expect_complete("the demo feed is a seeded set that fits one page")?;
+```
+
+`alloy::page::scan_all(store, prefix, page, ceiling)` walks the scan cursor for
+you, `page` rows at a time up to `ceiling` rows, and returns a `Page` of
+`(key, value, version)` rows. A result set larger than `ceiling` returns a
+truncated `Page` carrying its resume key; the `alloy` template reads its notes
+this way and keeps the rows with `into_rows_lossy`.
+
+## Version-skew protection
+
+Every loader payload carries the server's `build` string from `AlloyApp::BUILD`.
+A front end that saves the `build` string from its first payload detects when a
+later payload carries a different value (meaning a deploy changed the contract
+under a running bundle) and reloads the document instead of rendering new data
+with older JavaScript. Bump `BUILD` whenever the payload shape changes so that
+check stays meaningful.
+
+Next: [Actions & Effects](/developers/alloy-actions/).

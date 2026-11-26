@@ -1,0 +1,158 @@
+---
+title: "Dashboard WebMCP"
+description: "Let the assistant in your browser inspect visitor routes, deployed application versions, and attached resources from the Ferrite dashboard you are already using."
+section: "Assistants & MCP"
+order: 6
+---
+
+Whenever your browser provides `document.modelContext`, the Ferrite dashboard registers one read-only WebMCP tool, `inspect_application_graph`. An assistant running in the same browser can call it to read the currently selected account's visitor routes, applications, deployments, and attached resources as a single graph while your session cookie stays hidden from the assistant.
+
+WebMCP browser support is experimental. Enabling `document.modelContext` currently requires Chrome started with `--enable-features=WebMCP`, and Chrome's experimental implementation does not yet pass a tool's `outputSchema` through to the assistant.
+
+`inspect_application_graph` is read-only and stays registered only while the dashboard is open. To deploy, mutate, or roll back applications, or to let an external coding agent operate your account, use the Ferrite MCP tools or CLI described in [MCP-only Operations](/developers/mcp-only-operations/) and [Agent setup](/developers/plugin/).
+
+## Ask for an application graph
+
+Sign in to the dashboard, select the account you want to inspect, and prompt your browser's assistant:
+
+<blockquote class="docs-agent-prompt">
+  <p>Show me a visitor graph for <code>search-api</code>, then compare the application versions that are deployed.</p>
+</blockquote>
+
+The assistant discovers `inspect_application_graph` and invokes it twice:
+
+```json filename="Visitor view"
+{
+  "view": "visitor",
+  "appName": "search-api"
+}
+```
+
+```json filename="Application versions"
+{
+  "view": "application_versions",
+  "appName": "search-api"
+}
+```
+
+The `visitor` view traces traffic from the public visitor to configured domains, their verification states, and the active bindings serving the application. The `application_versions` view connects the application to its deployed revisions, generations, environments, and health. Nodes can include a dashboard `href` so the assistant can explain the graph and link you straight to the matching dashboard page.
+
+## Choose a graph view
+
+| View | Use it to answer |
+| --- | --- |
+| `visitor` | Which domains lead a visitor to this application? |
+| `application_versions` | Which revisions and generations are deployed for this application? |
+| `full` | How do visitor routes, applications, deployments, and attached resources fit together? |
+
+Omit both `appName` and `appId` to inspect the entire selected account, or pass exactly one of them to scope the graph to a single app without ambiguous matching. An unknown application returns `application_not_found`. When a bounded name search cannot confirm that an application is absent, the tool returns `application_lookup_incomplete` and asks the assistant to retry with the exact `appId`. The schema has no account selector: the active dashboard session supplies the selected account so tool arguments cannot pivot into another account.
+
+Each source collection is bounded to 500 items across paginated cursors. When a collection exceeds 500 items, or when an item cannot be placed cleanly in the graph (such as a domain or resource referencing an application outside the loaded set, or a deployment with an ambiguous application name), the response sets `truncated: true` and appends a sentence to `warnings` for each unplaced item so the assistant reports what is missing.
+
+## Register a read-only tool in your own application
+
+You can reuse the dashboard's registration pattern in your own signed-in pages. Feature-detect `document.modelContext` and tie the registration to an `AbortController` scoped to the signed-in view so the tool unregisters automatically when the view unmounts or the active account changes:
+
+```tsx filename="src/agent/dashboard-webmcp.tsx"
+import * as React from "react"
+
+export function DashboardWebMcp({ api, session }) {
+  // The account named in a /a/<account>/ path, decoded, or null.
+  const routeAccount = () => {
+    if (typeof window === "undefined") return null
+    const match = window.location.pathname.match(/^\/a\/([^/]+)(?:\/|$)/)
+    if (!match) return null
+    try {
+      return decodeURIComponent(match[1])
+    } catch {
+      return null
+    }
+  }
+
+  React.useEffect(() => {
+    const modelContext = document.modelContext
+    if (!modelContext) return
+
+    const registration = new AbortController()
+    void modelContext.registerTool({
+      name: "inspect_application_graph",
+      title: "Inspect application graph",
+      description:
+        "Read visitor routes, application versions, deployments, and attached resources for the selected account.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          view: {
+            type: "string",
+            enum: ["visitor", "application_versions", "full"]
+          },
+          appId: { type: "string", maxLength: 256 },
+          appName: { type: "string", maxLength: 128 }
+        },
+        allOf: [{ not: { required: ["appId", "appName"] } }],
+        additionalProperties: false
+      },
+      // The graph object, or a { code, message } refusal; see "Read the result".
+      outputSchema: graphOutputSchema,
+      annotations: {
+        readOnlyHint: true,
+        consequentialHint: false,
+        untrustedContentHint: true
+      },
+      execute: (input = {}, options) => {
+        // Stop the read when either the caller or the registration aborts.
+        const signal = options?.signal
+          ? AbortSignal.any([registration.signal, options.signal])
+          : registration.signal
+        // Refuse when the page shows a different account from the session's.
+        const requestedAccount = routeAccount()
+        if (
+          session
+          && requestedAccount
+          && requestedAccount !== session.selectedAccountId
+        ) {
+          return Promise.resolve({
+            code: "account_selection_required",
+            message: "Select the account shown in the dashboard before inspecting its application graph."
+          })
+        }
+        return inspectApplicationGraph(api, session, input, signal)
+      }
+    }, { signal: registration.signal }).catch(() => {
+      // The visual dashboard still works when browser policy disables tools.
+    })
+
+    return () => registration.abort()
+  }, [api, session])
+
+  return null
+}
+```
+
+Fetch independent dashboard reads in parallel through the existing `DashboardApi` methods so the tool and visual UI share one authorization path and one set of response types. `routeAccount` extracts the decoded account segment from `/a/<account>/` paths; when it differs from `session.selectedAccountId`, `execute` refuses with `account_selection_required` so the tool never reads one account while you are viewing another. `inspectApplicationGraph` and `graphOutputSchema` live in the same module.
+
+## Read the result
+
+`view` defaults to `full`. A successful graph response contains `accountId`, `view`, `observedAt`, `truncated`, `warnings` (an array of strings), `nodes`, and `edges`. Each node carries `id`, `kind` (`visitor`, `domain`, `application`, `deployment`, or `resource`), `label`, and optional `detail` and `href` fields. Each edge carries `from`, `to`, and `relation` (`routes_to`, `serves`, `runs_version`, or `uses`).
+
+Any refusal returns `{ code, message }`. Alongside the codes above, the tool returns `invalid_input` for a non-string selector, an unknown `view`, an `appId` longer than 256 characters, an `appName` longer than 128 characters, or input supplying both `appId` and `appName`. It returns `graph_evidence_invalid` when the API returns an item without an `id`, duplicate items, or resources belonging to another account, so the tool never draws a graph from inconsistent data.
+
+## Authentication and data boundaries
+
+- Same-origin API requests automatically send the dashboard's Secure, HttpOnly session cookie; JavaScript and the assistant never receive the session bearer.
+- A signed-out call returns `authentication_required` without enumerating accounts, apps, or domains.
+- The active account comes solely from the verified session, and tool arguments cannot select another account.
+- The tool is strictly read-only, receives no CSRF token, and exposes no dashboard mutation methods.
+- Setting `untrustedContentHint: true` flags account-authored names and labels as untrusted data so the assistant does not treat them as instructions.
+- Labels and details truncate at 512 characters with control characters replaced by spaces, and every node `href` is constrained to a same-origin path starting with a single `/` so responses cannot inject external links.
+- Aborting the registration tears down the previous tool when its view unmounts or the signed-in context changes, and the next effect binds the replacement to the new account.
+
+When a browser does not expose `document.modelContext`, the dashboard's visual pages and API-backed controls continue to work normally.
+
+## Next steps
+
+- Use the [Dashboard](/developers/dashboard/) guide for application controls, action recovery, and current limits.
+- Use [WebMCP & OpenAPI](/developers/webmcp-openapi/) to map your own application operations.
+- Add [Authentication](/developers/authentication/) before exposing signed-in browser tools.
+- Use [Authorization](/developers/authorization/) to keep business permissions in your application.
+- Inspect [Domains](/developers/domains/), [Deployments](/developers/deployments/), and [Object Storage](/developers/object-storage/) in the visual dashboard.

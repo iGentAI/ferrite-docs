@@ -1,0 +1,79 @@
+---
+kind: lesson
+course: ship-an-alloy-app
+title: Set up Ferrite and run the live counter
+description: "Give your coding agent the quickstart prompt, confirm the deployment it proposes, and check that a saved count survives a reload."
+order: 1
+---
+
+import AgentSetup from "../../../components/AgentSetup.astro"
+
+Get one minimal app deployed end to end before you write the booking studio. The quickstart prompt builds a live counter with a web page, an increment API, and a live feed of the count. Running it first verifies the exact toolchain, credential, testing, and deployment loop you will repeat across this course, and confirms that persisted state survives a reload.
+
+## Before you start
+
+Install [rustup](https://rustup.rs/) and open a fresh terminal if Rust is not on your machine. The CLI builds apps with Cargo and stops with `cargo did not start` during `ferrite check` when Rust is missing. Generated projects pin their required Rust version, and rustup downloads it on the first check.
+
+You do not need to sign up on the web beforehand. Ferrite provisions accounts for agents, so your coding agent creates an account during setup and gives you a link to claim ownership afterward. If this machine already holds a working Ferrite account, setup keeps it.
+
+## Run the prompt
+
+Know what setup writes to your machine before pasting the prompt. Your agent installs the `ferrite` CLI in `~/.local/bin` without administrator privileges and without editing your shell startup files. It stores one login in `~/.config/ferrite/credentials.toml`, readable only by you. It adds a `ferrite` MCP server (`ferrite mcp-serve`) using that login to your agent's user-level configuration, and installs a Ferrite skill in your agent's user-level skills directory without removing existing entries. Neither the prompt nor the setup instructions contain credentials.
+
+Copy the following prompt into your coding agent, or open it directly with one of the agent links:
+
+<AgentSetup firstApp />
+
+If you already have a Ferrite account and want setup scoped to it, use your account's prompt from the dashboard. Open **Getting started**, select **Create your first app**, and select **Copy prompt** (if the section is hidden, select **Show getting started** first). Because that prompt names your account explicitly, your agent checks that the local CLI login matches before touching any cloud resources.
+
+## What your agent does
+
+The prompt points your agent to Ferrite's public setup instructions. Before building anything, your agent tells you what Ferrite is and what the application would cost each month. It then works through these steps and reports on each one:
+
+1. Checks for the Ferrite CLI and installs a native binary after verifying its checksum.
+2. Inspects local credentials with `ferrite account --json` and branches on what it finds:
+   - When the CLI holds a working login and the prompt either names no account or names that same account, the agent keeps it.
+   - When the prompt names a different account from the local CLI login, the agent stops and lists your choices without overwriting anything. Ferrite issues an account's credential once, to whoever created the account, so you either work from the machine holding that login, create a named token in the dashboard under **Settings > API tokens** and import its credentials file here, or start a new account.
+   - When no credential exists and the prompt names no account, the agent creates a trial account (`ferrite login --ephemeral`, called a temporary account in the CLI, with an ID starting with `eph-`). It does this without asking and tells you which account type it chose and why. To use a durable account from the start, say so in the prompt. A trial account lasts 48 hours and starts with $50 of credit. That $50 is also the account's hard cap because credit cannot be added to a trial account. Each app runs as one instance with 256 MiB of memory and half a CPU, with a 32 MiB maximum source upload. When the 48 hours end, the account expires and any running apps are withdrawn. The studio in this course declares 256 MiB and half a CPU, which fits inside a trial account. A durable account (`ferrite login --id NAME`) has no 48-hour expiry, lifts the trial limits, and also starts with $50 of welcome credit.
+   - When a credential file exists but cannot be used, the agent stops and explains recovery without creating a second account.
+3. Scaffolds the starter in a new directory with `ferrite new webapp hello-ferrite --with-tests`, then runs `ferrite check --json` and `ferrite test`.
+4. Provides a one-time claim link when the account has no human owner yet. Open the link and enter an email address and passphrase to become the account's owner and sign in to the dashboard.
+5. Identifies the target account and asks for your confirmation before deploying, because deploying and serving spend credits. When an estimate is available, the agent displays it as an estimate and reminds you of the 48-hour expiry on trial accounts. You can inspect costs upfront with `ferrite cost` (MCP: `estimate_cost`), which reports the account's balance, deploy fee, and projected monthly cost per application at current rates without charging or deploying anything. See [Understand usage and credits](/kb/guide/usage-and-credits/) for details on balances and charges.
+6. Runs `ferrite check --remote --json` and `ferrite deploy` after you confirm, and follows the build to completion.
+7. Opens the returned URL, reads the count, increments it, reloads, and verifies that the new value persisted.
+
+If your agent skips a step, such as deploying without asking for confirmation first, stop it and tell it to follow the setup instructions.
+
+## Check the result
+
+When setup succeeds, your agent gives you the live URL along with the account and app names. Open the link yourself, click the increment button, and reload the page to confirm the updated count still appears. If your agent could only verify the API and not the rendered page, this browser check confirms the full path.
+
+## Troubleshoot setup
+
+The setup instructions tell your agent to stop and report failures directly without attempting workarounds. These are the cases you are most likely to hit:
+
+### Agent received a sign-in page
+
+Public setup requires no sign-in or access token. Confirm that the URL belongs to `ferrite.cloud` and report the unexpected response without supplying credentials to it.
+
+### CLI cannot be installed
+
+The CLI is published for macOS on Apple silicon, Linux on x86-64, and Linux on ARM64 (glibc 2.34 or newer; musl systems such as Alpine are not supported). Use a supported machine for this course.
+
+### Account does not match the prompt
+
+The CLI on this machine is logged in to a different account or endpoint from the one in the prompt, or to none. You cannot connect an existing account through a browser on Ferrite Cloud: `ferrite agent connect` exits with `AGENT_SETUP_UNSUPPORTED_PLATFORM` and saves nothing. Work from the machine that already holds the login, or create a named token in the dashboard under **Settings > API tokens** and import its credentials file with `ferrite login --credentials-file`, as [Fix sign-in problems](/kb/guide/fix-sign-in-problems/) describes. Named tokens leave other installations working. Do not let your agent replace a working credential without your permission.
+
+### Trial account is about to expire
+
+A trial account expires 48 hours after creation, at which point running apps are withdrawn and nothing can be recovered. Before then, move its apps into a durable account by running `ferrite claim` on the machine that created the trial account, running `ferrite claim --into FILE` with an existing durable owner's credentials file, or calling the Ferrite MCP `claim` tool with the claim token that `ferrite login --ephemeral` stored. If the account has already expired, start again with a durable account to work past 48 hours.
+
+### Durable account deployment is refused for credit
+
+The CLI reports this refusal as `INSUFFICIENT_CREDIT`. Check the current balance with `ferrite statement`. If the $50 welcome credit is spent, claim the account using the link your agent gave you, sign in to the dashboard, and add credit before redeploying. Do not let your agent create another account to get past the refusal.
+
+### `ferrite check` or `ferrite test` fails
+
+Your agent reports the failing command and its output. The starter is expected to pass both checks, so keep that output for Ferrite support.
+
+For the same steps without an agent, follow the [Quickstart](/developers/quickstart/). The rest of this course uses the same CLI and account.

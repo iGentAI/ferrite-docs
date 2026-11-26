@@ -1,0 +1,193 @@
+---
+title: "Dashboard"
+description: "Inspect applications, deployment history, prepaid credit, usage, spending limits, and recovery from the Ferrite Dashboard."
+section: "Deploy"
+order: 0
+---
+
+The [Ferrite Dashboard](https://dashboard.ferrite.cloud/) is the account owner's
+control surface over everything your coding agents deploy. It shows each
+application's live route, build history, resources, logs, and usage alongside
+account credit, ledger charges, scaling controls, application releases,
+spending limits, and write-only secrets.
+
+Sign in with an identity provider enabled on your installation. The Dashboard
+derives ownership from your session and displays only accounts you own. When a
+backend read fails, the UI renders the error directly and never fills the gap
+with sample data.
+
+## Connect your coding agent
+
+Open **Getting started**, select **Create your first app**, and copy the setup
+prompt. The prompt binds the session to your account and endpoint. If the
+machine where your agent runs already holds credentials for that account, the
+agent verifies access with `ferrite account --json` and continues. Otherwise
+the agent connects to your account through the browser: with the CLI it runs
+`ferrite login --sign-in`, and through a connector or remote MCP server it opens
+Ferrite's connect page, where you choose **Sign in to your Ferrite account**. In
+both cases you continue with Google or GitHub, pick the account and click
+**Allow**. For a machine without a browser, create a named token under
+**Settings > API tokens** and import its credentials file with
+`ferrite login --credentials-file <path>`. See
+[Connect any agent to your Ferrite account](/developers/connect-any-agent/).
+
+## Claim an account your agent opened
+
+When your coding agent opens an account on its own, ask it for the claim link
+(the `claim_url` tool). Open the link and continue with Google or GitHub. On a trial account the page then offers two choices:
+
+- **Keep this as my account** makes the trial a permanent account of your own.
+  Its applications, their URLs and data stay as they are and the 48-hour
+  deadline is gone; the account ID changes from `eph-…` to a readable one, and
+  the CLI login and every connected agent follow it automatically.
+- **Move it into** an account you already own moves the trial's applications
+  into that account, and the CLI login and every connected agent follow them.
+
+**Connected agents** lists every agent connected through a connector or the
+remote MCP server. Move a connection to another account you own, or revoke it;
+an agent that should start a fresh trial or use a different account disconnects
+Ferrite and connects again.
+
+On a durable account with no owner, signing in attaches it to you. Treat the
+claim URL as a credential and keep it out of chat logs and support tickets. See
+[`ferrite claim`](/developers/cli-commands/#ferrite-claim) for command flags.
+
+## Inspect and change an application
+
+Select any application to view its serving route, build history, resources,
+logs, and usage. Each panel loads independently. Use **Try again** on a failed
+panel, and check pagination and completeness notices when reviewing history.
+
+Available controls match your account permissions and wait for server
+confirmation before reporting completion. From the application view you can
+submit source, change instance counts or autoscale policies, roll back, manage
+previews, cut and promote application releases across environments, withdraw
+the app, fork state, manage domains, update membership, set spending limits,
+and write secrets. Secret reads return names only, never values.
+
+Under the application's Settings tab, **Capacity** exposes **Rollback one
+generation** once more than one generation exists, behind a typed confirmation
+phrase; rollback switches to the previous artifact and leaves stored data
+untouched. **Preview a version** builds a preview for a branch or commit,
+displays its host and expiry, and provides **Delete preview**. **Autoscale and
+fork** sets the autoscale policy and offers **Fork app**, which copies the
+application and its data into a new application under the name you enter (see
+[State forks](/developers/environments/#state-forks)).
+
+In the application's Usage section, **App spending limit** sets the maximum
+cumulative amount that application can be charged from the moment the limit is
+first set. It tracks cumulative spend from that point onward and does not reset
+each month. The panel states which charges count on your installation: either
+deploys, requests, and reserved resources, or deploys and requests alone with
+reserved resources billed to the account. Any deploy that exceeds the remaining
+ceiling is refused. Once the ceiling reaches zero, the platform stops the
+application on its next metering pass. The account spending limit applies
+across every application as well and can stop this one independently.
+
+Use the [CLI deployment workflow](/developers/deployments/) for repeatable
+source deployments. After any lifecycle change, open the application and verify
+the workflow your users depend on. A completed control-plane action confirms
+that the platform applied the change; it does not prove that the application
+behaves properly.
+
+## Read credit and usage
+
+Account credit, charges, statement rows, and application telemetry live under
+**Usage and billing** with explicit coverage evidence. If the usage
+projection is unavailable, rebuilding, or missing a window, the Dashboard
+reports that state and withholds unsubstantiated totals. Missing telemetry is
+never displayed as zero traffic. Usage totals are cumulative. Daily traffic
+(requests, top pages, unique visitors, and the 200 most recent requests) is
+retained for 35 days: the app's Usage view covers 7, 14, or 30 days, Logs
+displays recent requests, and Observability displays 14 days of account-wide
+traffic.
+
+**Cost by app** breaks down charges for the current calendar month, the prior month, or the last 30
+days into reserved resources, requests, and deploys, followed by account-wide
+rows so the table adds up to the period total. Reserved resources bill to the
+account on each metering pass, and the platform records each application's
+share on the charge so the Dashboard splits the cost per app. Earlier charges
+recorded without per-app shares appear as reserved resources not split by app.
+AI Gateway calls bill per inference key and appear as one account-wide row.
+
+**Account spending limit** sets the maximum cumulative spend across the account
+from when tracking started. It does not reset monthly, and any charge that
+would exceed it is refused. When the platform bills a model call through the
+[AI gateway](/developers/ai-gateway/), it reserves the estimated cost before
+calling the provider and credits back any unused part as a named refund. That
+refund restores your balance without lowering the cumulative amount counted
+against the spending limit. On Ferrite Cloud, AI Gateway calls require sealing
+your own provider key first and draw zero Ferrite credit; see
+[Where it runs](/developers/ai-gateway/#where-it-runs). Monthly budgets,
+forecasts, and threshold alerts are not offered.
+
+Run `ferrite cost` (MCP: `estimate_cost`) to inspect your balance, the deploy
+fee, and each application's projected monthly rate at current prices. It
+charges nothing and deploys nothing; see
+[Before you deploy](/developers/deployments/#before-you-deploy-what-it-will-cost).
+Neither the CLI command nor the MCP tool forecasts price changes or enforces
+caps. Spending limits in the Dashboard handle enforcement.
+
+Charges identify the application or account service, meter, rate, and source
+operation. Expand **Charge details** to inspect model and pricing evidence.
+Welcome credit appears as an explicit grant on the ledger. Amounts keep
+microcredit precision: 1 credit equals 1,000,000 microcredits ($1.00 USD). When
+attribution or history coverage is incomplete, the Dashboard reports the gap
+directly.
+
+Select a period and click **Export period history (.csv)** to export every page
+of one fixed snapshot, up to 20,000 entries, with coverage evidence and totals.
+The export stops if that snapshot cannot be read completely. **Download these
+entries (.csv)** downloads only the rows currently returned in the account
+statement view.
+
+A trial account lasts 48 hours and starts with $50 of credit. It runs one
+instance of each application at 256 MiB of memory and half a CPU, caps source
+uploads at 32 MiB, and cannot be funded, so that $50 is also its hard spending
+limit. A durable account receives a one-time $50 welcome credit.
+
+When checkout is enabled on your installation, review the quote before opening
+secure checkout. A payment remains pending until the account ledger confirms
+settlement; a checkout return page alone does not prove credit has posted to
+your balance.
+
+On a durable account, the platform warns you when remaining credit drops below
+7 days of running at your current charge rate, and again below 24 hours. When
+the balance hits zero, your applications stop. The platform keeps them and
+their data for 30 days, records each application's instance count and autoscale
+policy, names the exact deletion date, and warns again 7 days and 24 hours
+before deletion. Stopped applications accrue zero charges while held. After 30
+days, the applications and all their data are permanently deleted and cannot be
+recovered. The `notifications` tool returns each of these notices. Trial
+accounts do not enter this 30-day hold; they cannot be funded, and their
+applications suspend as soon as credit runs out.
+
+Adding enough credit to cover roughly one day of running at your stopped
+applications' rate (at least $1.00) restarts them automatically at their saved
+instance counts and autoscale policies. Each stopped app's page also offers
+**Review resume** so you can inspect the saved settings before confirming. An
+application stopped by an account or app spending limit does not restart when
+you add credit: raise or remove the limit first, then restore capacity in
+Settings.
+
+See [Usage and credits](/kb/guide/usage-and-credits/) and
+[Analytics and usage](/developers/analytics/).
+
+## Recover an interrupted action
+
+An operation started in the Dashboard keeps its account, target, and
+idempotency key across page reloads. If a timeout or network drop interrupts
+the reply, return to the operation and retry it. The Dashboard replays the same
+idempotent request and reads server state before reporting success. Resetting
+an operation whose outcome is unknown requires a separate explicit action and
+allows a duplicate request through.
+
+For a write-only secret update, seeing the secret name after a lost response
+cannot confirm which value was written. The Dashboard keeps that uncertainty
+visible.
+
+## Inspect with the assistant in your browser
+
+[Dashboard WebMCP](/developers/dashboard-webmcp/) exposes a read-only graph of
+the selected account through the same authenticated API. It never exposes the
+session cookie or deployment controls.

@@ -1,0 +1,91 @@
+---
+title: "MCP Servers"
+description: "Build stateless HTTP MCP servers on Ferrite and offer your application's operations to assistants as bounded tools, through the same handlers as your HTTP routes."
+section: "Assistants & MCP"
+order: 3
+---
+
+Ferrite applications can expose Model Context Protocol (MCP) tools over stateless HTTP so your users' assistants can discover and call bounded operations through the same handlers as your HTTP routes. Clients call `server/discover`, list available tools, and invoke tools with the protocol version and capabilities carried on each request, so your application holds no per-connection session state.
+
+This guide covers MCP servers exposed by your own application. For the Ferrite MCP endpoint your coding agent uses to deploy and operate apps, see [Agent setup](/developers/plugin/). To call an external MCP server from an agent running inside your app, use `use_mcp_connection` over a declared `mcp-egress` destination in the [Agent SDK](/developers/agent-sdk/).
+
+## Which clients can connect
+
+A server built directly on the `mcp` package speaks only MCP revision `2026-07-28`. Clients that have not adopted `2026-07-28` cannot connect to it.
+
+The `agent-ready` MCP face speaks `2026-07-28` and also handles the `2025-11-25` `initialize` handshake. It accepts earlier revisions (`2025-06-18` and `2025-03-26`) and answers them as `2025-11-25` calls. Serve your tools through `agent-ready` when you need compatibility with assistants on older MCP revisions.
+
+The same revision constraint applies to outbound connections: the `mcp` package's client, which the agent SDK uses to mount remote MCP servers, connects only to servers that speak `2026-07-28`.
+
+## Add the MCP package
+
+```bash
+ferrite add mcp
+```
+
+Before signing in to Ferrite on a machine, pass `--registry https://packages.ferrite.cloud/registry.json`. See [Packages](/developers/packages/) for registry and vendoring details.
+
+The `mcp` source package provides the constrained wire format, stateless client, resource-server shell, and authorization helpers without adding an async runtime or a second Cargo dependency to your app.
+
+If you want one `Surface` declaration to project the same operations into both MCP and OpenAPI, install `agent-ready` instead:
+
+```bash
+ferrite add agent-ready
+```
+
+Declare each tool's name, description, input and output schemas, and `read_only` or `idempotent` traits, and delegate every tool call to the same domain handler used by your HTTP routes.
+
+## Route the endpoint
+
+```json filename="ferrite.json"
+{
+  "services": [{ "name": "mcp-requests", "primitive": "queue" }],
+  "applications": [{
+    "name": "tools",
+    "artifact_key": "apps/tools@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "requests", "kind": "queue", "service": "mcp-requests" }
+    ],
+    "routes": [{
+      "prefix": "/mcp",
+      "binding": "requests",
+      "kind": "api",
+      "forward_headers": ["mcp-protocol-version", "mcp-method", "mcp-name", "accept", "authorization"]
+    }]
+  }]
+}
+```
+
+MCP `2026-07-28` requires `Mcp-Method` and `Mcp-Name` headers to match the JSON-RPC request body. A server built on the `mcp` package rejects requests missing them with error code `-32020`, so your route must forward both headers.
+
+Include `authorization` in `forward_headers` only when your MCP endpoint validates a scoped bearer token. Never expose a browser session cookie to a remote MCP endpoint.
+
+## Authentication and authorization
+
+Remote MCP clients authenticate with a bearer token scoped to your application. The `mcp` package's resource-server shell validates every request in three stages: the protocol envelope, the bearer token, and whether the token's scopes permit the requested operation. Tokens can be minted and signed by your own app using an HMAC secret, or verified against an authorization server via RFC 7662 introspection over your app's declared egress handle.
+
+The package checks three scopes: `mcp:read` for listing and reading, `mcp:tools` for invoking tools, and `mcp:write` alongside `mcp:tools` for any tool your registry marks as mutating. `server/discover` requires no token so clients can learn how to authenticate. The shell also generates the protected-resource metadata document and the challenge header pointing clients to your authorization server.
+
+Your application supplies three values: the HMAC secret, the canonical resource identifier that every token is bound to, and the egress handle for any authorization server called during introspection. Fail closed if any required value is unset. Never derive the resource identifier from a request header, because an untrusted caller could otherwise choose the audience for its own tokens. When a tool cannot establish the required subject, tenant, or role, return a structured authentication error instead of fixture data or an assumed tenant.
+
+When your application acts as an MCP client, the package's OAuth client is verified against the official conformance runner's mock authorization servers rather than live third-party providers; test it against your target authorization server before shipping.
+
+Inside a browser, WebMCP lets page tools run under your app's signed-in session and CSRF checks; see [WebMCP & OpenAPI](/developers/webmcp-openapi/). For the rules governing when an assistant may act on a user's behalf through WebMCP versus remote MCP, see [Assistants acting for a person](/developers/authorization/#assistants-acting-for-a-person).
+
+## Tool design
+
+- Give each tool one bounded job.
+- Describe when to call it and where required IDs come from.
+- Mark read-only tools accurately.
+- Require idempotency keys for retryable mutations.
+- Return structured errors without secrets or internal stack traces.
+- Keep user content clearly marked as untrusted data.
+
+See [Agent-ready apps](/developers/agent-native-apps/) for the full discovery surface.
+
+## Follow changes and long-running work
+
+Use [MCP Events](/developers/mcp-events/) for event discovery, delivery modes, and client examples, and [MCP Tasks](/developers/mcp-tasks/) for resumable long-running operations, client examples, and deployment tracking. Events support is experimental; check the [Availability](/developers/mcp-events/#availability) section before advertising an event so your app matches what hosted endpoints support. For Tasks, verify that the endpoint advertises the extension before relying on it, as described under [Discover support](/developers/mcp-tasks/#discover-support).
+
+The `agent-ready` MCP face serves these capabilities from the same `/mcp` endpoint when your `PageSource` implements them: authored skills as MCP resources (`skills`), event types and delivery modes (`events`, `poll_event`, `event_delivery`, defaulting to polling unless your host mounts another transport), and task-backed tools (`task_tools`, `task_call`). All three default to empty, so an application that supplies none advertises none.

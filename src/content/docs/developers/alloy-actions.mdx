@@ -1,0 +1,222 @@
+---
+title: "Alloy Actions & Effects"
+shortTitle: "Actions & Effects"
+description: "Replay-safe mutations in Ferrite Alloy: idempotency markers, action stamps, mount-point authority, CSRF origin checks, the outbox, and sagas."
+section: "Alloy"
+order: 5
+---
+
+A single click can reach an action handler more than once. The queue redelivers a request if its lease expires before your app replies, and a client that drops the connection before seeing a response may send the `POST` again. The gateway retries only stalled `GET` requests (up to three times) and never replays a `POST`, so queue redelivery and client retries are the two duplicate paths you have to handle.
+
+Without replay safety, a duplicate delivery applies the mutation twice, such as charging a customer twice for one checkout. Alloy enforces replay safety by binding every action to an idempotency key and storing a durable result record. When a second delivery arrives with an already recorded key, Alloy returns the **first admitted answer** instead of running the mutation again. Queue redeliveries always carry the same key; client retries replay when the caller resends the same `idempotency-key` header, as explained in [The idempotency key and the marker](#the-idempotency-key-and-the-marker).
+
+## Mounting an action
+
+Mount each action handler in an `Actions` table alongside the authority it requires, and route `/__alloy/action/<name>` in your `dispatch` function to `alloy::app::dispatch_action`. The `alloy` starter template sets up its table like this:
+
+```rust filename="src/lib.rs"
+fn actions() -> Actions<App> {
+    let mut actions = Actions::new();
+    actions.public(ADD_NOTE, |ctx, req| Box::pin(add_note(ctx, req)));
+    actions
+}
+```
+
+If your app uses the contract generator, declare each action under `app/` so `ferrite dev` emits its typed client, TanStack Query hook, and allowed invalidation tag families:
+
+```rust filename="app/drops/actions.rs"
+alloy::action! {
+    name: toggle_repost,
+    input: ToggleRepost,
+    output: RepostResult,
+    tags: ["drops", "drop-*"],   // the tag FAMILIES it may invalidate
+}
+```
+
+### Authority is declared at the mount point
+
+`Actions` provides three mount methods: `public`, `writer`, and `admin`. The dispatcher verifies the declared `Authority` before parsing the request body or invoking the handler. You define how callers qualify by implementing `AlloyApp::admit`. The default implementation fails closed, so mounting a `writer` or `admin` action without implementing `admit` returns an error instead of leaving the handler unguarded. Keeping authority on the mount table lets you audit every mutation's access policy in one place instead of checking the opening lines of every handler.
+
+`admit` returns Alloy's `Result<()>`. To pass a complete HTTP reply straight back to the browser, wrap it with `AlloyError::reply(reply)` (Alloy 0.5.0 and later). Applications using the `auth` package rely on this so `writer` actions keep the auth gate's 303 sign-in redirect, 401 unauthorized response, and 403 CSRF failure details intact:
+
+```rust
+async fn admit(ctx: &AppContext, req: &IngressRequest, authority: Authority) -> Result<()> {
+    match authority {
+        Authority::Public => Ok(()),
+        Authority::Writer => signed_in(ctx, req).await.map(drop),   // auth.gate(...).map_err(AlloyError::reply)
+        Authority::Admin => Err(AlloyError::forbidden("no admin actions")),
+    }
+}
+```
+
+See [Sign-in for Alloy applications](/developers/authentication-alloy/) for the full authentication setup, including HTML forms carrying CSRF tokens.
+
+### CSRF origin checks
+
+Alloy's origin gate runs before `admit` and before input decoding. It inspects three headers: `Origin`, `Sec-Fetch-Site` (set by the browser and unreachable from page script), and `Host`:
+
+| What the gate sees | Outcome |
+|---|---|
+| No `Origin`, and `Sec-Fetch-Site` is absent, `same-origin`, or `none` | Admitted: a non-browser client sends no `Origin` and carries no victim cookies |
+| No `Origin`, and `Sec-Fetch-Site` is `cross-site` or `same-site` (sibling subdomains count) | Refused 403 |
+| An `Origin` listed in `ALLOWED_ACTION_ORIGINS`, as a full origin or bare host | Admitted |
+| An `Origin`, no `Host`, and `Sec-Fetch-Site: same-origin` | Admitted: standard path for same-site forms on Ferrite |
+| An `Origin` whose host matches `Host`, and `Sec-Fetch-Site` is neither `cross-site` nor `same-site` | Admitted: local harness or gateway that forwards `Host` |
+| Anything else, including `Origin: null` from a sandboxed frame | Refused 403 |
+
+The platform gateway forwards only headers listed in `forward_headers` and never forwards `Host`. Put both `origin` and `sec-fetch-site` on your action route, as the `alloy` template does. Without `sec-fetch-site`, forms from your own pages fail with 403. Without either header, every request looks like a non-browser client and cross-site forms pass through to your handler.
+
+To permit an extra origin explicitly, add it to `ALLOWED_ACTION_ORIGINS`:
+
+```rust
+impl AlloyApp for App {
+    const ALLOWED_ACTION_ORIGINS: &'static [&'static str] = &["https://admin.example.com"];
+    // ...
+}
+```
+
+Entries match an exact full origin or bare host; substrings never match. For state-changing endpoints outside the action dispatcher, such as cookie-authenticated JSON routes, call `alloy::app::check_unsafe_request_origin` directly.
+
+## The idempotency key and the marker
+
+The gateway attaches a replay key to every incoming request. If the caller sends an `idempotency-key` header, the gateway forwards it unchanged; if absent, the gateway fills in the request's correlation ID, which is fresh on every HTTP attempt, retries included. Queue redeliveries of one request preserve the same key and replay. Without an explicit `idempotency-key` header, a client retry after a lost reply gets a new correlation ID and runs the action again.
+
+Plain HTML forms cannot attach custom headers, so double-clicking or resubmitting after a network drop invokes the action twice. The `alloy` template replies to its form post with a 303 redirect so browser reloads repeat the `GET` instead of the `POST`. If a form must also tolerate double submissions, submit it from script with an explicit key or design the handler to be naturally repeatable.
+
+The generated TypeScript client creates a new random key on each call unless you pass one. Create the key once per user click and reuse it across retries:
+
+```ts
+const key = crypto.randomUUID();     // once per click
+await toggleRepost(input, key);      // a retry passes the same key
+```
+
+Read the scoped key in Rust through Alloy and derive the action ID from it:
+
+```rust
+let idempotency = crate::alloy::app::idempotency(req);
+let id = action_id("toggle_repost", &idempotency);
+```
+
+`idempotency(req)` does not return the caller's raw header value. Because callers pick that string themselves, it cannot distinguish callers or payloads on its own. Instead, `idempotency(req)` hashes the header together with the request's session credentials (its `authorization` header and the session cookies listed in `alloy::app::SESSION_COOKIES`), HTTP method, path, and body. Resending the exact request with the same key replays; reusing that key from a different caller or with different input runs as a separate action. When you have already resolved a signed-in user ID, call `idempotency_as(req, &user_id)` so retries still replay even if the session cookie refreshes between attempts.
+
+Marker keys use a length-prefixed digest of `(action, idempotency_key)`. That prevents collisions such as `("a:b", "c")` versus `("a", "b:c")` and keeps caller input inside its namespace. If a marker exists in storage and cannot be decoded, Alloy fails closed and refuses the action: the earlier delivery already ran its effect, so admitting a second execution would break the guarantee the marker enforces.
+
+## The guarantee is per effect class
+
+Replay guarantees depend on which Ferrite service stores the effect. APE (atomic envelope) backs [Transactions](/developers/transactions/).
+
+| Effect class | Mechanism | Guarantee |
+|---|---|---|
+| APE writes | The marker commits in the same envelope | **Exactly once**: effect and marker commit atomically or not at all |
+| Store writes | The stored value embeds an `ActionStamp` | **Effectively once**, provided no other invocation (of this action or another) writes the key between an attempt and its retry |
+| Blob writes | The object key is the content digest | Naturally idempotent |
+| Queue / egress / notification | `OutboxIntent` committed with the marker, drained afterward | **At-least-once**; egress calls and notifications carry the action ID |
+
+Each APE envelope holds 64 entries. The version guard and replay marker use 2 entries; the remaining 62 are shared across the action's own APE writes, one entry per advanced tag, one record per outbox intent, and (when any intents exist) one pending-index entry. Exceeding 62 entries fails the commit with 400.
+
+### Action stamps: why the store path needs one
+
+Key-value store writes and APE commits are independent operations. If your process crashes after a store compare-and-swap succeeds and before the APE marker commits, a retry re-reads the key, encounters an unexpected version, and cannot tell whether it performed that write itself. An `ActionStamp` puts the writer's action ID inside the stored value, so a retry that finds its own ID knows the write already landed:
+
+```rust filename="src/lib.rs"
+let stamped: ActionStamp<DropView> =
+    serde_json::from_slice(&raw).map_err(|e| AlloyError::internal(e.to_string()))?;
+if stamped.last_action_id == id {
+    // This invocation already applied its write; the stored value IS its result.
+    break stamped.value;
+}
+// ... CAS loop: put_if_version, losers re-read and re-decide
+```
+
+`alloy::actions::put_stamped(store, key, &value, &action_id)` handles the complete read, stamp check, `put_if_version` write, and retry loop. It returns `true` when this call wrote the value, `false` when the stamp shows this invocation already wrote it, and 409 conflict if contention persists past the retry cap.
+
+An `ActionStamp` records only the **last** writer. If action A writes the key and crashes before committing its APE marker, and action B then overwrites the same key, action A's retry sees B's ID and applies A again. Two distinct invocations of the same action overwrite each other's stamps the same way, so dedicating a key to one action type does not eliminate the race. Use `ActionStamp` when reapplying the write is harmless, such as replacing a value. For accumulating state like counters or balances, commit the write inside APE with a per-invocation receipt. Writer serialization closes the gap only if no new write can begin while an earlier invocation on that key remains unresolved.
+
+### The atomic commit
+
+`ActionRunner::commit` writes your APE effects, tag advances, and replay marker in one APE envelope guarded on the tag-table version:
+
+```rust
+let mut runner = ActionRunner::new(ctx.ape("tags")?);
+let effects = Effects::new()
+    .tag("drops")
+    .tag(format!("drop-{id}"))
+    .outbox(OutboxIntent::Notify {
+        severity: "info".into(),
+        kind: "repost".into(),
+        body: format!("drop {id} reposted"),
+    });
+let admitted = runner
+    .commit("toggle_repost", &idempotency, &effects, result_json, now)
+    .await?;
+```
+
+The marker check runs on every iteration of the guarded loop. If two concurrent deliveries both see no marker, one wins the version guard; the loser re-reads, finds the winner's marker, and returns the winner's admitted result without reapplying the effect. Any effect key colliding with Alloy's reserved protocol keys (version guard, marker, tag epoch, outbox record) is rejected before the loop starts. The reply includes the advanced `[tag, epoch]` pairs so clients invalidate only the affected queries.
+
+### JSON actions for a generated client
+
+The generated TypeScript client posts JSON and reads replies in the shape `{ "result": ..., "advanced": [[tag, epoch]] }`. Three helpers in `alloy::actions` match that contract:
+
+- `decode_input::<T>(req)` parses the JSON body and returns 400 when malformed.
+- `ActionRunner::commit_reply(req, action, &key, &effects, &result, now_ms)` runs the atomic commit and replies 200 with the first admitted result and advanced epochs.
+- `replay_reply(req, &record.result, &record.advanced)` formats an already-recorded admission in the same JSON shape.
+
+`alloy::actions::perform(ctx, name, idem, declared_tags, generated::tag_is_declared, core)` runs the recorded check, executes `core`, and commits against the `tags` handle in one call. It returns an `Admitted` value (`result`, `advanced`, and `first_admission`) for `replay_reply`. Because `perform` validates `declared_tags` against the action's declared tag families after `core` finishes, an undeclared tag fails the request after any store writes `core` already performed; catch undeclared tags in tests.
+
+Setting `replay: false` in `alloy::action!` updates only the generated contract documents (`openapi.json` and `llms.txt`) to state that repeating an `idempotency-key` runs the action again. Generated code ignores the flag, so your handler must implement that behavior directly.
+
+## The outbox: effects on other planes
+
+Queue publishes, outbound egress requests, and notifications cannot join an APE transaction. Instead, commit an `OutboxIntent` inside the same APE envelope as your replay marker so intents never exist without an admitted action and admitted actions never drop their intents:
+
+```rust
+pub enum OutboxIntent {
+    Publish { handle: String, payload: Vec<u8>, not_before_ms: u64 },
+    Egress  { handle: String, url: String, body: Vec<u8> },
+    Notify  { severity: String, kind: String, body: String },
+}
+```
+
+APE supports no prefix scan, so discovery rides the same envelope: committing intents also updates a pending index sharded across 16 fixed keys, which the drain inspects in a single `multi_get`. You can publish a queue wake-up to lower latency; losing that signal only delays work until the next poll and never drops an intent.
+
+`OutboxDrain` runs interleaved with your request loop (every 1 second, or every 8 requests, whichever comes first). It claims a self-expiring store lease per shard so a crashed instance cannot wedge a shard, runs each intent, and records completion. Delivery is deliberately **at-least-once**: crashing between performing an effect and recording completion repeats the effect instead of losing it. Egress calls and notifications carry the action ID for remote deduplication, whereas queue publishes carry only the payload bytes your action supplied. Undecodable outbox records are quarantined with their raw bytes instead of being dropped or stalling their shard.
+
+One action can commit at most 32 intents. Each of the 16 shards indexes up to 512 pending actions; if the drain falls behind and a shard fills up, new actions with intents targeting that shard fail with 409 conflict so clients can retry.
+
+An `OutboxIntent::Egress` sends a `POST` containing `body` through the named egress handle with one header, `idempotency-key`, set to the action ID (`<action id>:<n>` for each intent after the first) so receivers that honor it can discard duplicates. It adds no other headers; if a remote API requires `authorization` or `content-type`, call it from your handler or a queue consumer instead. Responses of 5xx, 408, or 429 leave the intent pending for the next pass; any other status, including 4xx, marks the intent done. Outbound URLs pass through the standard egress gateway and must appear in your `ferrite.json` egress allowlist ([Secrets & Egress](/developers/secrets-egress/)). A disallowed destination remains pending and delivers once you add it to `ferrite.json` and redeploy; while blocked, those pending intents occupy slots in their shard and can trigger 409 responses if the shard fills.
+
+## Sagas: cross-key writes
+
+The key-value store has no multi-key transactions, so any workflow updating multiple keys requires a fixed phase sequence and an explicit crash-recovery plan. `SagaSpec` declares both in one place:
+
+```rust
+let spec = SagaSpec::new("merge_leads")
+    .phase("write_target", "re-run: the write is stamped and idempotent")
+    .phase("tombstone_source", "resume here: target already written");
+
+let mut saga = spec.run(ctx.ape("tags")?, &idempotency);
+match saga.step("write_target", || async { /* ... */ }).await? {
+    outcome if outcome.is_stop() => return /* halt: simulated or real crash */,
+    _ => {}
+}
+```
+
+Each phase writes a durable completion record. On redelivery, the saga resumes at the first phase with no completion record. `StepOutcome` distinguishes `Performed`, `Skipped` (already completed; continue to the next phase), and `Stopped` (halt immediately). A boolean cannot separate skipping from stopping because they require opposite control flow.
+
+`SagaSpec::crash_points()` enumerates every interior phase boundary and `stop_after(n)` simulates a crash at that step so tests can verify recovery at every boundary without test-only code paths in your handlers. A saga must define 2 to 8 phases with distinct names, execute them strictly in declaration order (out-of-order steps are refused), and attach an `after_crash` repair note to each phase.
+
+## Limits, and when not to use an action
+
+| Limit | Value | When it is reached |
+|---|---|---|
+| Entries one action commits beside the guard and marker | 62, shared by APE writes, tag advances, outbox intents, and the pending-index entry | The commit is refused with 400 |
+| Outbox intents per action | 32 | The commit is refused with 400 |
+| Pending actions per outbox shard | 512, across 16 shards | A new action with intents on a full shard is refused with 409 |
+| Intents one drain pass performs | 32 | Remaining intents wait for the next pass |
+| Drain schedule | Every 1 second, or every 8 requests, whichever comes first | |
+| Attempts on a contended commit or stamped write | 8 | The call answers 409, which a client may retry |
+| Saga phases | 2 to 8, distinct names, stepped in order | The saga is refused |
+
+Use actions for state changes requested by a user or client. Keep reads in loaders so the cache can serve them and the gateway can hedge stalled `GET` requests. Schedule deferred background work on a queue using `OutboxIntent::Publish` with `not_before_ms`. Because cross-plane effects are delivered at least once, any downstream service that cannot accept duplicates must deduplicate on its own, using the `idempotency-key` header on egress calls or an ID inside your queue payload.
+
+Next: [Documents & Assets](/developers/alloy-documents/).

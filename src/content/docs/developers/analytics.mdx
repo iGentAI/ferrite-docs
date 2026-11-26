@@ -1,0 +1,47 @@
+---
+title: "Analytics and usage"
+description: "Read cumulative application usage, 35-day daily traffic, prepaid account statements, and AI gateway attribution without treating missing telemetry as zero."
+section: "Observe"
+order: 2
+---
+
+Ferrite maintains three usage and billing records: cumulative gateway totals per application (requests, errors, bytes, and latency), a daily traffic series covering the newest 35 UTC days, and your account statement of funding and charges. Use cumulative totals for a quick check, the daily series to track trends over time, and the statement to reconcile spend. All three appear in the [Dashboard](/developers/dashboard/); the MCP `usage` and `account_statement` tools return cumulative totals and the statement.
+
+## Check coverage before totals
+
+Application usage carries a coverage state and an observation watermark. When the projection is rebuilding, unavailable, or contains a gap, the Dashboard withholds unverified totals. Missing observations never establish zero traffic. Cumulative totals span from the first request the gateway observed for the application (`first_ms`) through the most recent (`last_ms`).
+
+## Read daily traffic
+
+Ferrite records daily traffic per application for the newest 35 UTC days:
+
+- Total requests per day.
+- Up to 50 distinct paths per day, with remaining paths grouped under `(other)`.
+- Exact unique visitors per day up to 50,000 (days reaching 50,000 are marked as capped).
+- A rolling log of the 200 most recent requests.
+
+In the Dashboard, an application's **Usage** section shows 7, 14, or 30 days of daily traffic, **Logs** displays the 200 recent requests, and **Observability** shows 14 days of account-wide traffic. Daily series and path breakdowns live in the Dashboard only; the MCP `usage` tool returns cumulative totals since `first_ms` with no per-day or per-path split.
+
+The traffic record collects minimal client metadata. Each entry in the recent-request log stores timestamp, HTTP method, path with the query string stripped, status code, latency, response size, and whether the request was a page view; it drops both client IP address and user agent. Paths longer than 256 bytes are truncated to 256 bytes.
+
+Unique visitors are counted from a digest of the UTC day, client address, and user agent, keyed by a secret generated per application and per day. The same browser at the same address counts once per UTC day and cannot be linked across days or across applications. Each day's visitor keys and secret are deleted once the following UTC day ends. These retention and stripping rules apply to the application traffic record; server infrastructure logs are covered separately by the Ferrite Cloud privacy policy.
+
+## Read what you are charged
+
+Ferrite draws from a prepaid balance at metered rates, with no plan fee or seat fee, and estimates deployment costs up front. Run `ferrite cost` (MCP: `estimate_cost`) to inspect your account balance, deploy fee, and each application's projected monthly cost at current rates without charging or deploying. See [Before you deploy](/developers/deployments/#before-you-deploy-what-it-will-cost) for how to interpret the quote.
+
+For a running application, call the MCP `service_costs` tool to see what each bound service reserves and its monthly cost. Run `ferrite statement` (MCP: `account_statement`) for your current balance and itemized entries: deploy fees, hourly metering of reserved app and service resources, and gateway serving charges where enabled by the installation. See [Usage and credits](/kb/guide/usage-and-credits/) for what happens when the balance reaches zero.
+
+In the Dashboard statement view, **Export period history** downloads an entire billing period from a single consistent snapshot, up to 20,000 entries. Periods exceeding 20,000 entries are refused and no partial file is written. **Download these entries** saves only the statement rows currently loaded on the page.
+
+## Read AI attribution
+
+The [AI gateway](/developers/ai-gateway/) records requested model, served model, provider, token counts, billing mode, cost, and timing for every call routed through it. `usage.billing` distinguishes platform-credit calls from bring-your-own-key calls, and `usage.cost_micros` stores cost in millionths of a US dollar.
+
+Direct calls from an application to a model provider carry separate provider billing and never appear as AI gateway inference charges. The optional `ai-budgets` package supplies application-level attribution and allowance types inside your crate, but it is not wired into the gateway. Installing `ai-budgets` does not activate account billing or enforce a platform spending limit.
+
+## Investigate a change
+
+Start with one concrete question, such as whether 5xx responses climbed after a deploy. Narrow the application, time window, and generation before pulling individual log tails. Compare provider billing records, gateway totals, and application traffic side by side without treating them as interchangeable counts.
+
+For application diagnostics, see [Logs](/developers/logs/).

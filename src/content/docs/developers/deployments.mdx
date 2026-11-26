@@ -1,0 +1,214 @@
+---
+title: "Deployments"
+description: "Submit source, follow admission and the attested build until the new generation runs, and retrieve the application host."
+section: "Deploy"
+order: 1
+---
+
+Ferrite deploys from source. You never upload a locally compiled binary. The
+platform checks the manifest and Rust source, compiles the artifact in an
+attested build, records the new generation, and starts the instances. The CLI
+reports success only after the platform reports that generation running. Expect
+builds to take three to eight minutes because the platform compiles the checked
+source itself.
+
+## Before you deploy: what it will cost
+
+```bash
+ferrite cost
+```
+
+`ferrite cost` (MCP: `estimate_cost`) reads `./ferrite.json` and reports your
+account balance, the deploy fee, and each application's projected monthly rate
+at current prices. It charges nothing and deploys nothing. By default it prices
+one instance; pass `--instances <n>` to estimate another count.
+
+Every charge draws from your prepaid balance. A deploy the balance cannot cover
+is refused with `INSUFFICIENT_CREDIT` in the CLI and `InsufficientCredit` in
+MCP. The platform charges the deploy fee when it accepts a submission and
+refunds it automatically if the build fails. Refusals at admission or for
+insufficient credit incur zero charge, and running `ferrite deploy` on an
+unchanged project submits nothing. Submitting identical source twice starts two
+builds and bills two deploy fees, which is why the CLI submits each attempt
+once (see [The MCP contract](#the-mcp-contract)).
+
+Monthly estimates project from current rates, so metered usage can differ, and
+an estimate enforces no cap. Spending is bounded by your prepaid balance and
+Dashboard spending limits. See
+[Read credit and usage](/developers/dashboard/#read-credit-and-usage) for both
+mechanisms and what happens when a balance reaches zero.
+
+If you are a coding agent, bring the estimate to the account owner before
+deploying. Ahead of the first deploy of a new application, run `ferrite cost`
+(or `estimate_cost`) and report the deploy fee, the projected monthly cost, and
+the current balance. On a durable account, wait for approval before proceeding.
+On a trial account, a request to build authorizes that first deploy: state the
+figures and proceed unless told to stop. Always ask first before redeploying an
+application that already serves users, and before any destructive or visible
+change: scaling, rollback, withdrawal, domain edits, promotion, or secret
+changes on a live app.
+
+## Deploy source
+
+```bash
+ferrite deploy
+```
+
+`ferrite deploy` checks the project, submits it once, follows the remote build,
+and prints the application's host once every instance of the new generation is
+running without error. The CLI does not send an HTTP request to your app, so
+hit a live route yourself to verify it answers.
+
+### What the CLI does before it submits
+
+`ferrite deploy` inspects the endpoint's `tools/list` first. It requires both
+`deploy_source` and `build_status` and exits before submitting anything if
+either tool is absent.
+
+Before submission, the CLI writes the manifest it will send to
+`.ferrite/upstream-projection/`, leaves your own files untouched, and logs
+every adjustment:
+
+- Removes `required_secrets`, which the platform's manifest parser rejects with
+  `SPEC_PARSE`, keeps the list locally, and refuses submission before sending
+  (`DEPLOY_REQUIRED_SECRETS_MISSING`) if any listed secret is absent from
+  `list_secrets` or if `list_secrets` fails, unless `--allow-missing-secrets`
+  is passed.
+- Keeps every route's `rate_limit_per_min` and holds any deployment carrying
+  that key (see below).
+- Removes `forward_headers` from `stream` and `ws` routes and removes `native`
+  from `depends` entries.
+- Adds a small default `workload` to any service that omits one, so a shared
+  fleet does not reject placement after the full build finishes.
+- Refuses any manifest with an application `auth` block or a route
+  `stream_mode` unless you pass `--drop-auth` or `--drop-stream-mode` to strip
+  them.
+
+Run `ferrite check --target upstream` to preview the exact same adjustments
+without deploying. It accepts `--drop-auth` and `--drop-stream-mode`.
+
+Enforcement of `rate_limit_per_min` is not yet established on Ferrite Cloud, so
+`ferrite deploy` and `ferrite cost` hold any manifest that declares the key and
+explain why. Keep the key if your design requires it, and do not bypass the
+hold through raw `deploy_source`. See [Rate limits](/developers/rate-limits/)
+for bounding routes with the `http-route-budget` package. No flag overrides
+this hold, and manifests without the key proceed normally.
+
+Before submitting, the CLI also invokes the platform's `code_gate` and
+`validate_spec` at no charge. Passing `--skip-remote-gate` bypasses that
+pre-check; the attested build still enforces the same rules. Pass
+`--instances <n>` to set the desired instance count, or `--detach` to exit once
+the submission is accepted instead of following the build.
+
+If your source has not changed since the ready attempt currently served by the
+platform, `ferrite deploy` submits nothing and incurs no build or deploy fee.
+Updating a secret through `ferrite secrets` marks the app as changed so the
+next deploy rebuilds and delivers it. Pass `--force` to force a new build, such
+as after changing a secret directly through the MCP `set_secret` tool.
+
+If your application vendors the `auth` package and lacks a required platform
+secret, the CLI blocks submission and prints the exact `ferrite secrets set`
+commands needed. Passing `--allow-missing-secrets` submits anyway, and sign-in
+routes return `503` until those secrets are set and the application is
+redeployed.
+
+### The MCP contract
+
+Clients calling MCP directly submit via `deploy_source` with `spec` (the
+manifest serialized as a JSON string), `files`, and an optional `instances`
+count. The call returns `BuildStarted {app, build_id}` immediately while the
+attested build executes. Poll `build_status {build_id}` until the state reaches
+`deployed`, `failed`, `rejected`, or `stuck`. On Ferrite Cloud, `build_status`
+accepts an optional `wait_s` from `0` to `50` and waits up to that duration for
+a state transition before replying, so `build_status {build_id, wait_s: 50}`
+needs no client-side sleep loop.
+
+A `deployed` state means the new generation is registered; it does not mean
+processes are serving traffic yet. Poll `status {app}` and check `running`,
+`desired`, `observed_generation`, and `last_error`. Wait until `running`
+matches `desired` at the new generation with no `last_error` before treating
+the deploy as live.
+
+`deploy_source` is not idempotent. The platform ignores operation IDs, so
+submitting the same source twice runs two attested builds and bills two deploy
+fees. To protect against duplicates, the CLI journals each attempt under
+`.ferrite/deployments/`, submits once, and records the returned `build_id` so
+state survives crashes and dropped connections. See
+[MCP-only Operations](/developers/mcp-only-operations/) for reconciling a lost
+reply without the CLI.
+
+## Reconcile a lost reply
+
+If your connection drops while `deploy_source` is in flight, the CLI cannot
+tell whether the platform received the request and refuses to submit again.
+While an attempt stays open, the CLI also blocks new deploys of the same
+project for that account. Reconcile with the attempt ID printed at submission:
+
+```bash
+ferrite deploy status --attempt ATTEMPT_ID --json
+ferrite deploy wait --attempt ATTEMPT_ID --json
+ferrite deploy resume --attempt ATTEMPT_ID --json
+```
+
+`status` performs one bounded read, `wait` follows the attempt to completion,
+and `resume` reconciles an interrupted submission through read-only checks.
+First it queries `rcs_log {app, limit: 20}`, where the platform commits
+`deploy <build_id>: n file(s)` for every accepted deploy. Next it checks
+`account_statement`, where a build appears once charged. If a matching build
+turns up in either place, the CLI adopts it and polls `build_status`. If
+neither records the build after the settle window, the CLI closes the attempt
+so a new deploy can start. When an attempt was journaled locally before being
+sent, `resume` submits it for the first time, provided your local files have
+not changed since. Running `ferrite deploy resume` without `--attempt` selects
+the latest unfinished attempt in the project.
+
+Exit status `3` indicates an uncertain outcome, such as a connection drop
+during submission. Reconcile the recorded attempt; do not edit files, switch
+accounts, delete `.ferrite/deployments/`, or start another build. Exit status
+`1` means the platform explicitly refused the request and returned its error
+message; nothing remains to resume. Platform refusals arrive with `isError: true` and a top-level key naming the
+verdict (`Error`, `Unauthenticated`, `NotOwner`, `Rejected`, `QuotaExceeded`,
+`InsufficientCredit`), while negative verdicts such as failed builds or invalid
+specs arrive with `isError: false`. Inspect both `isError` and the structured
+payload fields.
+
+## Preview and release verbs
+
+`preview_ref`, `deploy_release`, `promote`, and `rollback_release` run
+asynchronously: each returns `BuildStarted {build_id}` immediately and is
+tracked through `build_status {build_id}` (with `wait_s` up to `50`) until
+terminal. A preview completes as
+`PreviewDeployed {app, preview_app, host, expires_at_ms, commit}`. The three
+release verbs complete as `deployed` once the environment pointer advances, or
+`pointer_denied` when the application deployed while the environment refused
+the advance. Do not resubmit while an operation is building.
+
+`ferrite preview` commits your working tree with `rcs_commit` and invokes
+`preview_ref`, then prints `BuildStarted {build_id, app}` and exits without
+waiting for the build or printing a URL. Poll `build_status {build_id, wait_s: 50}`
+until `PreviewDeployed` returns the preview host, the `preview_app` name
+required by `delete_preview`, and the expiry timestamp. See
+[Environments](/developers/environments/#preview) for preview limits and the
+release promotion order.
+
+## Check the deployment
+
+```bash
+ferrite status my-app
+ferrite logs my-app
+```
+
+Use the deployment journal commands to inspect an exact attempt, and use MCP
+for owner-scoped control-plane reads. Read the host returned by the platform
+rather than constructing one from the app name. For apps deployed via
+`deploy_source`, `deploy_history`, `releases`, and `environments` remain empty;
+rely on `status` and `rcs_log`.
+
+Verify four separate questions after every deploy: did the build pass, does the
+route respond, does the end-to-end user workflow succeed, and (when using
+releases) has the release reached production. A passing local build is not a
+deployment, and a `200` on a health check does not verify an authenticated
+workflow.
+
+Continue with [Environments](/developers/environments/) and
+[Scaling & Releases](/developers/scaling-releases/).

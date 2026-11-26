@@ -1,0 +1,218 @@
+---
+title: "Ferrite apps with the Ferrite CLI"
+shortTitle: "Ferrite CLI"
+description: "Create, check, run, test, and deploy Ferrite apps from one local workflow, and see where control-plane work moves to MCP."
+section: "Get started"
+order: 3.5
+---
+
+The Ferrite CLI covers the local side of building on Ferrite. Use it to scaffold projects, check code against platform rules, run apps against local planes, run tests, manage secrets and custom domains, and submit builds. Control-plane work such as scaling, releases, environments, and rollbacks runs through Ferrite MCP instead.
+
+## Install Ferrite
+
+Install the signed, checksum-verified binary with the shell installer:
+
+```bash
+curl -fsSL https://downloads.ferrite.cloud/install.sh | sh
+```
+
+The installer and package downloads are public. You only need a Ferrite account when you deploy or inspect private account data.
+
+The installer selects the archive for macOS on Apple silicon, Linux x86-64, or Linux ARM64 (`aarch64`). Both Linux builds require glibc 2.34 or newer; musl systems such as Alpine are unsupported, and no other platforms have a published binary. Before writing `~/.local/bin/ferrite`, the script verifies the release signature on the published checksum list with `openssl`, checks the archive hash, and runs the new binary with `--version` before replacing any existing install. If `openssl` is missing or verification fails, installation stops. Installing the binary requires neither Node.js nor a package manager. If `~/.local/bin` is absent from `PATH`, follow the path instruction the installer prints before running `ferrite`.
+
+Local build commands (`ferrite check`, `ferrite test`, and `ferrite dev`) compile Rust on your machine, so they need a Rust toolchain. Install it with rustup and open a new terminal:
+
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
+
+You do not need Rust installed to deploy. `ferrite deploy` sends your source to the platform, which runs the same gate and manifest checks and compiles the app remotely, so you can go from `ferrite new` to a live host without a local toolchain. Without Rust, `ferrite check --no-cargo` still runs the local gate and manifest checks. The installer warns when `cargo` is missing, and local build commands print the rustup command if they cannot start it.
+
+Check the installed release and current login state:
+
+```bash
+ferrite --version
+ferrite account
+```
+
+`ferrite --version` prints the release and the bundled SDK twin identity; `ferrite twin` compares that twin with the one a project was scaffolded from. Before you sign in, `ferrite account` prints `account: not logged in` and exits `0`. See [CLI Commands](/developers/cli-commands/#ferrite-account) for the exit statuses and JSON fields reported for expired, unreadable, or active logins.
+
+When Node.js (18 or later) and `tar` are on `PATH`, the installer also downloads the Ferrite plugin, registers Ferrite's MCP bridge in each installed Codex, Claude Code, OpenCode, and Pi client, and signs the CLI and those agents into one shared trial account, whose ID it prints. In that setup the CLI is already signed in, so you can skip `ferrite login`. Without Node.js or `tar`, the installer puts only the binary in place and prints next steps starting with `ferrite login --ephemeral`. Re-running the installer to update keeps a working login and its endpoint; it opens a trial account only when no working login is stored. See [Agent setup](/developers/plugin/) for the two ways to connect an agent and the tools each provides.
+
+## Inspect installation without changing files
+
+Run a dry run to see the selected archive and destination path without installing or executing the CLI:
+
+```bash
+curl -fsSL https://downloads.ferrite.cloud/install.sh | sh -s -- --dry-run
+```
+
+Pass `--no-agents` to install only the binary without connecting coding agents or opening a trial account:
+
+```bash
+curl -fsSL https://downloads.ferrite.cloud/install.sh | sh -s -- --no-agents
+```
+
+## Choose the instance
+
+Public installs default to `ferrite.cloud`. For another instance, preserve both the endpoint and dashboard origin supplied by that instance's setup prompt (**Copy prompt** in its dashboard names both). Never send its credential to the public endpoint or create another account to work around an endpoint mismatch.
+
+Each instance publishes its own installer and CLI at `https://downloads.<base-domain>/`, so install from the instance you intend to deploy to. Before submitting anything, `ferrite deploy` reads the endpoint's `tools/list`, checks for `deploy_source` together with `build_status` to recognize Ferrite Core, and refuses endpoints that lack either tool.
+
+## Get started
+
+Scaffold an app, run local checks, and start the dev server:
+
+```bash
+ferrite new alloy storefront --with-tests
+cd storefront
+ferrite check
+ferrite dev
+```
+
+`ferrite new` provides three templates, each generating a Ferrite Core manifest with no rejected keys:
+
+- `alloy` is the recommendation in `ferrite new --help` for anything that serves HTML: a server-rendered app with routing, documents, and form actions, with the Alloy framework vendored under `src/alloy/`.
+- `webapp` is a static page with a counter API and a live SSE feed, walked through in the [Quickstart](/developers/quickstart/).
+- `hello` is a compact request/reply API.
+
+Pass `--with-tests` to add the test SDK and a sample test.
+
+## Develop locally
+
+`ferrite dev` runs your app against local Store, Queue, Stream, Transaction, and Object Storage planes behind a gateway on `127.0.0.1`. It prints the local URL, persists plane state in `.ferrite/state` across restarts, rebuilds and restarts when Rust source changes, and syncs content directories without a rebuild.
+
+```bash
+ferrite dev --port 8787
+ferrite dev --instances 3
+ferrite dev --chaos 5
+ferrite dev --json
+```
+
+Without `--port`, the gateway binds port `8787` or selects the next free port, reports the port it bound, and records it in `.ferrite/dev.json`. A port set with `--port` (or `[dev] port` in `ferrite.local.toml`) is used as given and errors if already in use. Command-line flags override matching settings under `[dev]` in `ferrite.local.toml`.
+
+Use these flags to exercise production failure modes and automation locally:
+
+- `--instances` runs competing consumers against one shared set of planes, matching horizontal scale on the platform.
+- `--chaos` kills the app periodically so lease redelivery and idempotency bugs become visible.
+- `--json` emits one JSON lifecycle object per line for agents and automation.
+- `--fresh` discards `.ferrite/state` on startup; omit it for normal durable development.
+- `--clock-ms` starts the local clock at a fixed instant so time-dependent behavior runs deterministically.
+
+The gateway listens on `127.0.0.1` only and answers no requests from other machines. Only one `ferrite dev` session can run per project directory; a second session in the same directory is refused.
+
+Outbound HTTP is denied locally by default. Pass `--egress allow` to permit only destinations already declared in your app manifest. To reach a declared destination on `127.0.0.1` or `[::1]` during local development (such as a local AI gateway bound to loopback), also pass `--dev-loopback-egress-port <PORT>`, repeating it for additional ports. `ferrite check`, `ferrite deploy`, and the platform still refuse loopback destinations.
+
+### After updating the CLI
+
+Each CLI release carries one SDK twin (named by `ferrite --version`) and one local runtime. `ferrite dev` runs the CLI's own runtime, while `ferrite new --with-tests` copies that runtime and the test SDK into a new project's `vendor/` directory. Installing a newer CLI leaves existing `vendor/` files unchanged, and `ferrite twin` compares only the SDK twin, so review the vendored runtime yourself after an update.
+
+## Check against the platform
+
+```bash
+ferrite check
+ferrite check --target upstream
+ferrite check --remote --json
+```
+
+`ferrite check` runs the admission gate, static manifest checks, and `cargo check` on your machine. Its verdict is advisory: the local and platform gates can disagree in either direction, for example on macros that the platform checks against a reviewed allowlist.
+
+Add `--target upstream` to check Ferrite Core rules specifically: manifest keys the upstream parser refuses, SDK symbols absent from upstream `ferrite-app`, and the projection `ferrite deploy` would submit. Pass `--remote` to send your source to the platform's `code_gate` and your manifest to `validate_spec` at no charge and receive both authoritative verdicts.
+
+Ferrite Core has no managed authentication and no `auth_capability` tool. Its parser refuses an application `auth` block in the manifest; add sign-in as a vendored package instead.
+
+## Add packages
+
+```bash
+ferrite add agent-ready
+ferrite add mcp
+ferrite add browser-core
+```
+
+Deployable Ferrite apps may depend only on `ferrite-app`, so `ferrite add` vendors source packages directly into `src/` with `@generated by ferrite-pkg` headers and records them in `ferrite-packages.json`. Leave vendored files untouched so future `ferrite add` runs update cleanly; if you edit one, the next install stops and lists the conflict unless you pass `--force`.
+
+Without `--registry` or `--path`, `ferrite add` reads `https://packages.<base>/registry.json` derived from your configured endpoint. Before any login, no endpoint is configured and `ferrite add` exits with `Select a Ferrite instance first or pass --registry`; pass `--registry https://packages.ferrite.cloud/registry.json` or sign in first. A login at an endpoint other than `https://mcp.<base>/mcp` (such as a local fleet) also requires `--registry` or `--path`.
+
+Before installing, the CLI verifies `registry.json.sig`. The Ferrite Cloud registry key is built into the CLI. For any other registry, set `FERRITE_REGISTRY_KEYS=ed25519:<the registry's public key>` (from the registry owner) or pass `--allow-unsigned-registry` to trust the host directly; without either, installation is refused and nothing is written. Once a key is trusted for a registry, `--allow-unsigned-registry` is refused, and keys in `FERRITE_REGISTRY_KEYS` are trusted across all registries. `--path` installs from a local checkout and requires neither.
+
+Sign-in ships as one of these packages: `ferrite add auth` vendors the OAuth code flow with PKCE, store-backed sessions, and CSRF protection so your own handler can call it. The retired `ferrite auth` command prints a pointer to `ferrite add auth` and exits `2`. See [Authentication](/developers/authentication/).
+
+## Deploy
+
+```bash
+ferrite account
+ferrite cost
+ferrite deploy
+```
+
+Run `ferrite cost` before your first deploy. `ferrite cost` (MCP: `estimate_cost`) reports your account balance, the deploy fee, and each application's projected monthly cost at current rates without charging or deploying anything. It validates the manifest as a deploy would, exits `2` when invalid, and prices one instance unless `--instances` gives another count. Because the monthly total is a projection, metered usage can differ, and an estimate is not a spending cap; spending is bounded by your account balance and the limits in the [Dashboard](/developers/dashboard/#read-credit-and-usage). See [Deployments](/developers/deployments/#before-you-deploy-what-it-will-cost) for how to read the estimate and [CLI Commands](/developers/cli-commands/#ferrite-cost) for every flag.
+
+`ferrite deploy` computes the upstream projection of `ferrite.json` and `Cargo.toml`, prints each change, stages the copy under `.ferrite/upstream-projection/`, calls `code_gate` and `validate_spec`, submits the source once through `deploy_source`, and follows `build_status` and then `status`. It prints `deployed: ready` and the live host only after the platform reports the build deployed and running instances reach the desired count on the new generation. The CLI does not send an HTTP request to your app. If your app defines no route at `/`, the output also prints one line per declared route because the bare host answers `404`. See [Deployments](/developers/deployments/) for the projection, deploy journal, and exit statuses.
+
+An unchanged project submits nothing and incurs no charge. Updating a secret with `ferrite secrets` counts as a change so the next `ferrite deploy` builds and delivers it. Pass `--force` to build and deploy anyway, which you only need when a secret changed through another tool such as MCP `set_secret`.
+
+Deploys use whichever account the stored credential selects, including a trial account from `ferrite login --ephemeral`. A trial account lasts 48 hours, starts with $50 of credit, and runs one instance per app with 256 MiB of memory and half a CPU. To keep it, open its `claim_url` link and sign in: **Keep this as my account** makes the trial permanent in place with the same apps and URLs, and **Move it into** an account you already own moves the apps there. `ferrite claim` moves the apps into a new durable account from the terminal. Durable accounts have no 48-hour limit.
+
+Every charge draws from your prepaid balance. A deploy your balance cannot cover fails before anything is built or charged, returning `INSUFFICIENT_CREDIT` with what the account holds and what the deploy requires. When a durable account's balance reaches zero, its applications stop, remain kept for 30 days, and are then deleted permanently with their data. Trial accounts cannot be funded, so their apps suspend as soon as credit runs out. Run `ferrite statement` to inspect your balance and charges.
+
+When a submission's outcome is uncertain, the CLI reports `DEPLOY_SUBMIT_UNKNOWN` with a `cause` (for example `MCP HTTP 502`) and a `resume` command. A refusal returned by the platform before running the request is terminal and carries the platform's exact message.
+
+### `ferrite preview` and `ferrite test --remote`
+
+Both commands build on Ferrite Core's hosted repository operations (`rcs_commit`, followed by `preview_ref` or `test_ref`).
+
+`ferrite test --remote` calls `test_ref` and polls `build_status` until the run ends with `tested` or `test_failed`.
+
+`ferrite preview` calls `preview_ref`, prints the `BuildStarted` reply with its `build_id`, and exits without following the build. Once live, `build_status` returns `PreviewDeployed {preview_app, host, expires_at_ms}`; poll `build_status` for that `build_id` through `remote_build_status` in `ferrite mcp-serve` or the hosted MCP tool to read the preview host. Wait for that build to finish before running `ferrite preview` again.
+
+### Copy an app with its data
+
+`ferrite fork <copy>` asks the platform's `fork` tool for a copy-on-write clone of a deployed app (its code and all of its data cut at one instant) as a new app named `<copy>` at its own host. Pass `--app` to name the source (defaulting to `./ferrite.json`) and `--as-of <TIME>` to fork from a past timestamp within the platform window (14 days on Ferrite Cloud), given as RFC 3339 with a zone or Unix microseconds.
+
+The CLI follows `build_status` until the copy deploys and prints its host. The original app stays untouched. To update the copy's code without losing its data, deploy a working copy whose `ferrite.json` names `<copy>`.
+
+## Operate an app
+
+```bash
+ferrite account
+ferrite cost --dir storefront
+ferrite statement
+ferrite status storefront
+ferrite logs storefront
+ferrite usage storefront
+ferrite rcs status
+ferrite rcs log
+```
+
+Re-run `ferrite cost` (described under [Deploy](#deploy)) after changing an application's size or instance count. Run `ferrite statement` to trace your remaining balance through funding and metered charges. Both commands accept `--json`.
+
+`ferrite status` and `ferrite logs` resolve a project name to its deployed application through the deploy journal. `ferrite usage` reports requests, errors, bytes served, average and peak latency, and request charges via the MCP `usage` tool; outside a project directory, or with `--all`, it prints one line per application in the account.
+
+`ferrite withdraw <app>` takes an application down permanently: it ends any deploy under way on that name, unpublishes its routes, tears down the app, and checks `status` to confirm nothing remains. Because withdrawal cannot be undone, the CLI asks you to retype the app name unless you pass `--yes` for non-interactive shells. Serving the app again requires a fresh `ferrite deploy`. `ferrite rcs` keeps your local working tree aligned with the hosted repository using Git's subcommand names; see [CLI Commands](/developers/cli-commands/#hosted-source-ferrite-rcs).
+
+Secrets use dedicated subcommands. `ferrite secrets set <NAME>` reads the value from stdin (a terminal prompts without echo) or from `--value-file`, never from command-line arguments. `ferrite secrets list` prints secret names, and `ferrite secrets delete <NAME>` removes one. Secrets are write-only and never returned on read. The running process receives the value and can call out only to destinations declared in its manifest. New values reach running processes only through a deploy run after the secret is set. See [Secrets & Egress](/developers/secrets-egress/) for how secrets are held.
+
+`ferrite host` prints the host and origin an app will receive before its first deploy, so you can register OAuth callback URLs ahead of time.
+
+```bash
+printf %s "$VALUE" | ferrite secrets set STRIPE_KEY
+ferrite secrets list
+ferrite host
+```
+
+The CLI has no commands for scaling, releases, environments, notifications, or rollback; use Ferrite MCP for those (`ferrite domains add|check|list` manages custom domains directly from the CLI). To run a long-lived hosted tool such as `test_ref` as a durable MCP Task with a saved receipt you can follow and recover, use `ferrite tasks`; see [MCP Tasks](/developers/mcp-tasks/).
+
+## Use the CLI from an agent
+
+Follow [Agent setup](/developers/plugin/) so your agent knows when to reach for the CLI and when to call MCP. Prefer the CLI for source files, compilation, dev loops, and deploy tracking; use MCP for compact remote reads and focused control-plane actions.
+
+For MCP-only clients, `ferrite mcp-serve` exposes the local workflow over stdio as `local_*`, `rsx_*`, and `remote_*` tools. Its `remote_deploy` tool refuses and names `ferrite deploy` because deployments rely on the CLI's local journal. The portable plugin configures the stateless HTTP MCP service for remote work.
+
+## Troubleshooting
+
+- If compilation fails, fix the diagnostics above `build_failed`; Ferrite leaves the prior process in place and does not claim it restarted.
+- If content sync fails, fix the declared directory; the browser is not told a refresh succeeded.
+- If `ferrite dev` reports that the gateway could not bind, another process holds the port; stop it or pass `--port`.
+- If no credential is configured, run `ferrite login --ephemeral --endpoint https://mcp.ferrite.cloud/mcp` or import an issued credential with `ferrite login --credentials-file <path>`.
+
+See [CLI Commands](/developers/cli-commands/) for every command and flag.

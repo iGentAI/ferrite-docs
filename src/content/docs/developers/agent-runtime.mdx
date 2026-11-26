@@ -1,0 +1,104 @@
+---
+title: "Agent Runtime"
+shortTitle: "Agent Runtime"
+description: "How the agent SDK executes an agent on Ferrite: the session log on APE, the workspace on Blob and Store, idempotent submissions, compaction, crash recovery, and egress model transport to the AI gateway."
+section: "AI & agents"
+order: 3
+---
+
+Your product's agent is part of your product, so its runtime has to survive the same failures any deployed process meets: crashes, restarts, redelivered messages, and redeploys of your application. The `agent-sdk` runtime ports pi's agent loop and session model directly onto Ferrite's storage, queue, and egress primitives. This page traces what the runtime does with an agent function, where state lives, how failures recover, and what bounds apply.
+
+## Primitives, not a database
+
+Instead of asking you to operate a separate database for agent state, the runtime builds directly on three Ferrite storage services: APE (the atomic-envelope service behind transactions) for the session log, Store for versioned records and indexes, and Blob for content-addressed file bodies. Model and tool HTTP calls leave through declared egress handles, and client requests arrive on queues.
+
+| Concern | Plane | Shape |
+| --- | --- | --- |
+| Session log, enabled tools | APE (`session-state`) | An append-only log of mutations; the head record acts as the single-writer guard; enabled tool names live in an `enabled_tools` record in the log |
+| Instances, submissions, workspace index | Store (`workspace-index`) | CAS-versioned records and prefix scans |
+| Workspace file bodies | Blob (`workspace-content`) | Content-addressed bodies under `ws/<instance>/c/<sha>` (older path-addressed files remain under `ws/<instance>/b<path>`) |
+| Model calls | Egress (`gateway-egress`) to the AI gateway URL | The SDK's streaming HTTP transport |
+| Ingress and streaming | Queue (`requests`, `stream-requests`) | Platform request envelopes |
+
+The `requests` ingress queue and the `session-state` APE binding are required; without `session-state`, the application stops at startup. Missing optional bindings degrade their matching feature with a startup notice instead of aborting the app: without `workspace-index` the index stays ephemeral, without `workspace-content` workspace files stay ephemeral, without `gateway-egress` and its URL secret model calls fail with an explicit error, and without any of `web-egress`, `github-egress`, or `mcp-egress`, `app::http()` returns `None` so web, GitHub, and MCP tools stay unavailable.
+
+## Sessions
+
+A session is a tree of entries. Every message, compaction summary, branch summary, and durable fact names its parent entry; a **lane** points at a leaf, and the main lane is the conversation a client reads. Branching moves a lane to another leaf and summarizes the abandoned path so the model retains what it learned there.
+
+The log commits in atomic batches guarded by the head: each batch declares the head it saw, and APE's conditional commit rejects the batch if another writer won first. Creating a large session claims its id with a staging head first, writes pages under that guard, and publishes the real head last so concurrent creators cannot interleave. Session ids carry the instance's incarnation, so recreating a deleted instance opens a fresh conversation instead of resurrecting the old one.
+
+Beside conversation messages, the log records the durable facts that drive recovery and re-renders: `submission_started`, `submission_settled`, `state_write`, `tool_step_settled`, `agent_finish_cycle`, `resource_snapshot`, `message_data_write`, and `enabled_tools`.
+
+## Submissions
+
+A **submission** is one client request to an instance, carrying a delivered message, an optional result schema, and an idempotency key. For each submission, the runtime:
+
+1. Records `submission_started`.
+2. Renders the agent function and composes the system prompt and tool set.
+3. Narrates what changed since the last render (instructions, resources) as signals the model can read.
+4. Runs start hooks, then pi's loop (turns, tool batches, steering, and follow-up drain points) and persists every assistant message and tool result as it settles; whenever a tool writes persistent state or enables a discovered tool, the runtime renders again before the next turn and narrates the change.
+5. Runs structured-result reminders and finish-hook cycles as further loop runs, bounded at 32 cycles per submission.
+6. Records `submission_settled` and writes an idempotent Store record keyed by the submission id.
+
+An instance runs one operation at a time. A second concurrent request with a different key is refused with `session_busy`, which the HTTP faces answer as status `500` with `type: session_busy`. Because the status is `500` even though nothing has failed, match on `error.type` rather than status code; [Agent API](/developers/agent-api/#idempotency) shows how clients wait and retry. A request carrying the same idempotency key and identical payload as an in-flight submission joins that submission and receives its outcome. A redelivery after settlement returns the recorded outcome without running twice, while reusing the same key with a different payload fails with `submission_conflict` (HTTP `409`).
+
+An abort from `POST …/abort`, an ACP or A2A cancel, or a harness prompt's signal reaches in-flight model calls and running tools immediately instead of waiting for the next turn boundary. Every run derives its abort controller from its owner's signal, and a signal that has already fired never starts a model call.
+
+A `harness` tool's `prompt` runs a scratch conversation beside the main session (`{session}/harness/{submission}`) on the agent's model with the agent's tools and compaction settings; only its final text or validated structured result returns to the tool.
+
+The model call path retries transient failures three times with exponential backoff, and recovers from a context overflow once per run by compacting and retrying. Between turns, the loop checks whether the next turn fits and compacts ahead of time when it does not.
+
+## Compaction
+
+Compaction uses pi's algorithm and prompts: estimate context size from the last reported usage, cut so roughly `keep_recent_tokens` of recent conversation survive without splitting a tool batch, summarize everything before the cut (split turns receive a prefix summary merged under a turn-context heading), update any prior summary iteratively instead of replacing it, and carry the `## Files Read` and `## Files Modified` lists forward.
+
+Defaults derive from the model: `reserve_tokens` starts at 20,000, lowered to the model's output limit when smaller (never below 4,096) and capped at a quarter of the window when the reserve would take half of it; `keep_recent_tokens` defaults to 8,000, or a quarter of a small window. A 200k window yields 20,000 and 8,000; an unknown window falls back to 16,384 and 20,000. Override either setting per agent with `use_model_with`.
+
+## Recovery
+
+The runtime recovers from restarts and redeliveries using the append-only session log and queue lease rules:
+
+- An operation left open by a previous process is closed on the next open; unanswered tool calls receive synthetic error results so the transcript stays well-formed.
+- A `submission_started` entry without a matching `submission_settled` re-runs at startup (at-least-once), and the idempotency record converges the re-run with any reply the client already received.
+- A `.durable()` tool step whose result was already recorded replays its saved output instead of executing again.
+- A `task` delegation is keyed by its tool call, so a re-executed `task` returns the child session's existing answer.
+- The ingress lease is acknowledged only after the reply is published, so an unanswered envelope is redelivered.
+
+## The workspace
+
+`workspace()` implements a filesystem over Ferrite's primitives: file bodies live in Blob, an index of `file` and `dir` nodes (`size`, `mtime`, `sha`) lives in Store with one namespace per agent instance, and `readdir` and `walk` run over prefix scans. Every file tool is byte-bounded: budgets are checked before appending, room is reserved for the truncation notice, and clipping stays on UTF-8 character boundaries so tool output never overflows what the model can accept.
+
+## Model calls over the app's own egress
+
+The AI gateway runs beside the platform as an HTTP service, and a deployed agent app calls it through declared egress like any external origin. The SDK's `GatewayEgressTransport` reads the base URL from `agents-gateway-url`, sends `POST /v1/responses` over `gateway-egress` with `agents-gateway-key` in the request body's `key` field, and forces `stream: true`. A streamed response head can arrive before generation finishes, while the egress call itself is bounded only by a local timer capped at 24 hours. Whether the route yields a terminal `response.completed` SSE event or a buffered JSON body, the transport folds it into the single response the provider parses.
+
+Through the AI gateway, `agents-gateway-key` holds an inference key minted for the deployment's owning account or a Ferrite token. No provider key enters the app; the gateway owns the catalog, pricing, metering, and billing, and attributes each call to the account the credential resolves to. The SDK's `Usage` type carries the gateway's `billing` (`platform-credit` or `byok`) and `cost_micros` beside token counts and catalog-price estimates; `combine` sums `cost_micros` across a turn and keeps `billing` only when every call agreed. See [AI Gateway](/developers/ai-gateway/).
+
+When `agents-gateway-url` is exactly `https://api.openai.com`, the transport calls OpenAI directly instead: it removes the body `key` field, sends the secret as `Authorization: Bearer` (requiring an OpenAI API key), and strips the `openai/` prefix from model ids. OpenAI bills that account directly, and replies carry no `billing` or `cost_micros`.
+
+This egress transport is the SDK's only model path; it uses neither a `depends` entry nor a native service route.
+
+## Events
+
+Every runtime event (submission started and settled, assistant text, tool calls and results, state writes, and errors) is published to an in-process broadcast sink keyed by instance. The stream face subscribes to it to serve SSE, and your application can subscribe directly for its own telemetry or triggers.
+
+## Limits
+
+| Bound | Value |
+| --- | --- |
+| Delegation depth | 4 |
+| Finish-hook cycles per submission | 32 |
+| Structured-result follow-ups | 32 |
+| Transient model retries per call | 3 (2 s base, exponential) |
+| Overflow recoveries per run | 1 |
+| APE batch | 64 entries (larger batches are paged) |
+| Stream token lifetime | 10 minutes |
+| Instance id | 1 to 128 bytes, no `/` or control characters |
+| Submission id | 1 to 128 bytes, no `/` or control characters |
+| Open instances cached per process | 256 |
+| One model call | Local timer, at most 24 hours |
+| MCP connection | 32 `tools/list` pages, 512 tools, 50 KB per tool result |
+| ACP batch | 16 messages, at most one `session/prompt` |
+
+Continue with [Agent API & Protocols](/developers/agent-api/).

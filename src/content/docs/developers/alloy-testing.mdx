@@ -1,0 +1,100 @@
+---
+title: "Alloy Testing & Gates"
+shortTitle: "Testing & Gates"
+description: "How to verify a Ferrite Alloy app: its own tests against the local harness, the checks the contract generator performs, and the seams worth checking by hand."
+section: "Alloy"
+order: 8
+---
+
+You verify an Alloy app with your own tests and the CLI's static gates. When `ferrite new alloy` or `ferrite add alloy` vendors the `alloy` package into `src/alloy/`, it strips the package's internal `#[cfg(test)]` modules so your test runs execute only the tests you write.
+
+```bash
+ferrite test            # the app's tests: unit tests in src/ and everything in tests/
+ferrite check           # the source gate, the manifest statics and cargo check
+ferrite check --remote  # also asks the platform's code_gate and validate_spec, which are not charged
+```
+
+`ferrite test` fails if zero of your own tests ran: tests inside packages vendored by `ferrite add` and `#[ignore]`d tests do not count. Pass `--allow-no-tests` to accept an empty run explicitly.
+
+Local verdicts are advisory. `ferrite check --remote` submits your source to the platform's `code_gate` and `validate_spec` checks at no charge and without starting a build, and returns the exact static verdict a deploy meets. `ferrite test --remote` commits your source to the platform and executes your tests against that commit; the platform's build and gate decide what deploys.
+
+## Test the real application in process
+
+`ferrite new alloy --with-tests` writes `tests/smoke.rs`, which boots your real application against the local `TestHarness` from `ferrite-app-test` and asserts that `/` returns 200. Because it checks only startup and the home page, it keeps passing after you replace the starter demo. `TestHarness` binds the same queue, store, and APE plane contracts as the hosted platform and drives your real request loop, cache, and action runner without mocks:
+
+```rust filename="tests/smoke.rs"
+let env = TestHarness::new()
+    .with_queue("requests")
+    .with_queue("replies")
+    .with_store("cache")
+    .with_store("data")
+    .with_ape("tags")
+    .build()
+    .await;
+env.run_app(|ctx| async move { my_app::run(ctx).await });
+
+let home = env.handle(ingress::get("/")).await.expect("a reply");
+assert_eq!(home.status, 200);
+```
+
+The starter demo's end-to-end tests live in a `demo_tests` module at the bottom of `src/lib.rs`, so they leave when you remove the demo. They show how to assert replay safety: two deliveries under one idempotency key apply the action's effect once:
+
+```rust filename="src/lib.rs (demo_tests)"
+let post = || ingress::post_keyed("/__alloy/action/add-note", "k1", b"text=from+a+form");
+assert_eq!(env.handle(post()).await.expect("a reply").status, 303);
+assert_eq!(env.handle(post()).await.expect("a reply").status, 303);
+```
+
+`ingress::post_keyed` models a client resending its `idempotency-key` header or the platform redelivering one queued request. Browser forms send no `idempotency-key` header, and `ingress::post` behaves identically, so two `ingress::post` calls execute two separate actions. If your app must also prevent duplicate effects from double form submissions, cover that path with a dedicated test.
+
+Focus integration tests on behaviors that isolated unit tests cannot observe:
+
+- Document requests return the shell with server-rendered metadata and the embedded loader payload.
+- Replaying an action under the same idempotency key returns the first admitted answer without applying its mutation twice.
+- Advancing a tag epoch in an action causes the next loader read to miss the cache and load updated data.
+- Cross-site `POST` requests fail with 403 before reaching your action handler.
+- Running a second outbox drain pass does not repeat completed intents.
+
+## Misuse fails closed
+
+Alloy rejects unsafe configurations and corrupted records with explicit errors instead of falling back without an error. Knowing these refusals tells you what a failing test is pointing at:
+
+- An undecodable replay marker rejects the action instead of risking a duplicate effect.
+- Mounting a `writer` or `admin` action without implementing `AlloyApp::admit` rejects requests instead of serving the action unguarded.
+- Passing an unknown cache profile name returns `None` instead of picking a silent default.
+- A shell missing required substitution markers fails validation instead of serving broken HTML.
+- A truncated `Page` forces you either to follow its cursor or to call `Page::expect_complete` naming the bound that makes truncation impossible.
+
+## What the contract generator checks
+
+In an app with declarations under `app/`, every `ferrite dev` build runs the contract generator and halts with the exact file and reason if a declaration is invalid. The generator refuses:
+
+- Render modes other than `Static`, `Hybrid`, or `Spa`
+- Loaders missing an `output` type
+- Two routes sharing one ID
+- Route headers declaring `content-length` or `transfer-encoding`
+- Routes naming an undeclared action
+- Wire types missing `#[derive(Contract)]`
+- Floating-point fields anywhere inside an action's result type
+- Two actions producing the same hook name
+- Redirects whose `to` substitutes a parameter that `from` never captured
+- Redirects whose `from` shadows a declared route
+- Duplicate redirect sources
+- Redirects whose `to` matches another redirect's `from` (the runtime performs only one hop)
+
+The generator validates redirect patterns, but it does not validate route patterns. Malformed route syntax (such as `"/drops/[id"`, a catch-all segment that is not last, a missing leading slash, or a repeated parameter name) passes generation and panics at runtime when `generated::route_table()` runs. Add a unit test that calls `generated::route_table()` so invalid route patterns fail locally during `ferrite test`.
+
+The generated contract also catches drift between Rust and TypeScript. Rename a field in a `#[derive(Contract)]` struct under `app/`, and the next build fails in TypeScript wherever the frontend reads the old name, while `contract/openapi.json` and `contract/llms.txt` regenerate from the same declarations so all outputs stay in sync.
+
+## Seams to check by hand
+
+`alloy check` (the seam checker used on Ferrite's own Alloy apps) is not distributed with the CLI. Because Rust and TypeScript checks can each pass independently while a cross-layer mismatch still breaks the page, verify these four seams by hand or in your own CI:
+
+| Seam | What goes wrong |
+|---|---|
+| The entry file name | The shell names an asset the Vite build did not produce or a hashed filename that changes on the next build. The document answers 200 while the missing asset answers 404 and the page loads blank. Pin `entryFileNames` (or rely on manifest rewriting), compare the served shell against `web/dist/assets/`, and verify each asset loads |
+| Query network mode | A TanStack Query client without `networkMode: "always"` under both `queries` and `mutations` pauses every query and generated action hook whenever the browser reports itself offline |
+| Generated files | Any generated file whose `@generated` header is missing was edited by hand and will be overwritten by the next build |
+| Password hashing in development | An app mounting `alloy-auth` seeds password records with PBKDF2, which runs slowly when the SDK compiles unoptimized. Set `[profile.dev.package.ferrite-app] opt-level = 3` and the same for `profile.test` instead of lowering the iteration count |
+
+Next: [Rsx](/developers/rsx/), the server-first alternative.

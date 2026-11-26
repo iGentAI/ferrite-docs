@@ -1,0 +1,268 @@
+---
+title: "Agent SDK"
+shortTitle: "Agent SDK"
+description: "Write an agent as a Rust function inside your Ferrite application: compose hooks for models, tools, skills, subagents, MCP connections, a workspace, and structured results."
+section: "AI & agents"
+order: 2
+---
+
+Your product's agent is part of your product. When you add the `agent-sdk` source package with `ferrite add agent-sdk`, the agent runs inside your Ferrite application: you deploy and roll it back with the rest of your code, keep its conversations in the application's own storage, and list every host it can reach in the same `ferrite.json` manifest.
+
+Its authoring surface is modeled on [Flue](https://github.com/withastro/flue): you write an agent as a plain Rust function, declare what it can use through hooks, and build tools, skills, subagents, and MCP connections with `define_*` helpers. Underneath, the runtime ports [pi](https://github.com/earendil-works/pi)'s agent loop, session tree, compaction, and crash recovery onto Ferrite's storage and egress primitives. One deployment serves people and other agents over a JSON API, a live SSE stream, MCP, ACP, and A2A, backed by models from the AI gateway's catalog. Use it for support desks, issue triagers, scheduled reporters, or tool-using chats. This page covers authoring; [Agent Runtime](/developers/agent-runtime/) explains how the runtime executes and recovers underneath.
+
+## An agent is a function
+
+Before each submission, the SDK calls your agent function once (a **render**), records every hook it called, and assembles the system prompt and tool set for that run. If a tool writes persistent state or enables a discovered tool mid-submission, the SDK renders the function again before the next model turn and narrates what changed to the model. Your function returns the agent's `Instruction`.
+
+```rust
+use crate::agent_sdk::prelude::*;
+
+pub fn assistant() -> Instruction {
+    use_model("anthropic/claude-sonnet-4-6");
+    use_sandbox(workspace());
+    use_skill(
+        define_skill(SkillDefinition::new(
+            "verify-change",
+            "Verify a code change before reporting it done.",
+            "1. Re-read every file you edited with `read`.\n2. `grep` for each changed symbol.",
+        ))
+        .expect("a valid skill definition"),
+    );
+    use_subagent(define_subagent(
+        "researcher",
+        "Explores the workspace or the web to answer a focused question.",
+        || "You research. Read broadly, answer narrowly.",
+    ));
+    use_tool(word_count());
+    "You are a helpful assistant working inside a Ferrite workspace. \
+     Read before you write, keep answers concise, and show file paths clearly."
+        .into()
+}
+```
+
+Take `AgentProps` when instructions or bindings depend on which instance is rendering:
+
+```rust
+pub fn triage(props: AgentProps) -> Instruction {
+    use_model("anthropic/claude-sonnet-4-6");
+    format!("You triage incoming reports for instance {}.", props.id).into()
+}
+```
+
+Hooks are free functions that record onto the active render frame. Calling a hook outside a render panics with a message naming the hook. A root render that omits `use_model` fails with an authoring error naming the agent, and two tools with the same name are refused at render time.
+
+## Register and serve
+
+Collect your agents in an `Agents` registry. `Agent::new` binds a name to a function; `.describe` attaches its description and `.initial_data` attaches the JSON Schema callers may pass when creating an instance.
+
+```rust
+pub fn registry() -> Agents {
+    Agents::new()
+        .register(Agent::new("assistant", assistant).describe("A general assistant"))
+        .register(
+            Agent::new("triage", triage)
+                .describe("Classifies incoming reports")
+                .initial_data(serde_json::json!({ "type": "object", "properties": { "project": { "type": "string" } } })),
+        )
+}
+```
+
+Use `Agents::new().agent("name", function)` when you need no extra metadata. Hand the registry to `AgentApp` in your application's entry point:
+
+```rust
+impl FerriteApp for AgentsApp {
+    async fn run(ctx: AppContext) -> io::Result<()> {
+        agent_sdk::app::AgentApp::new(ctx).agents(agents::registry()).serve().await
+    }
+}
+```
+
+The registry sorts agents alphabetically by name, so the default agent for the thread API, ACP, and A2A is the alphabetically first name, regardless of registration order. Registering a second agent under an existing name replaces the first without error. Start from `AppConfig::default()` and pass `AgentApp::config(AppConfig { .. })` to override binding or secret names, opened egress handles (`egress`), `default_agent`, or `dev_mode` (which adds `dev` diagnostic fields to error envelopes). Call `AgentApp::index_html(html)` to serve an unauthenticated landing page on `GET /`, as the reference app does.
+
+## Hooks
+
+| Hook | Declares |
+| --- | --- |
+| `use_model(id)` / `use_model_with(id, options)` | The model as a gateway catalog id (`provider/model`); options set a `ThinkingLevel` and compaction config (`compaction(config)` or `compaction_disabled()`) |
+| `use_instruction(text)` | An additional instruction block appended to the prompt |
+| `use_tool(tool)` | A tool from `define_tool` or a built-in tool family |
+| `use_skill(skill)` | A skill the model can activate by name |
+| `use_subagent(subagent)` | A delegate reachable through the framework `task` tool |
+| `use_mcp_connection(connection)` | A remote MCP server whose tools join the tool set |
+| `use_tool_catalog(catalog)` | A catalog of discoverable tools for `search_tools` and `enable_tool` |
+| `use_sandbox(factory)` / `use_sandbox_in(factory, cwd)` | The environment the file tools operate on; `workspace()` is the Ferrite workspace rooted at `/`, and `workspace_in(cwd)` sets a working directory created on attach and seen by tools, harness, and prompt |
+| `use_persistent_state(name, default)` | Durable per-instance state returning the current value and a setter |
+| `use_initial_data::<T>()` / `harness::hooks::use_initial_data_value()` | The initial data passed when the instance was created |
+| `use_delivery()` | The message being delivered in the current submission, when present |
+| `use_agent_start(hook)` / `use_agent_finish(hook)` | Async hooks running before and after a submission |
+| `use_response_start(hook)` / `use_response_finish(hook)` | Per-model-response hooks returning metadata to record |
+| `use_data_writer(name)` | A writer for named message data clients can read back |
+| `use_dispatch_message()` | A dispatcher sending a message to this instance (`dispatch_self(message)`) or another (`dispatch(agent, id, message)`), resolving to the submission id |
+
+Subagent renders reject root-only hooks. Every render of an agent must declare the same set of `use_data_writer` names, whereas models, resources, and instructions can vary freely across renders.
+
+## Tools
+
+Define a tool with a name, description, JSON Schema input, optional output schema, and an async `run` closure. Use `ObjectSchema` with the `string`, `integer`, `number`, `boolean`, `array`, and `enumeration` helpers for common shapes, or pass any raw JSON Schema value.
+
+```rust
+fn word_count() -> Tool {
+    define_tool("word_count", "Count the words in a text")
+        .input(ObjectSchema::new().required("text", string("The text to count")).build())
+        .output(serde_json::json!({ "type": "object", "properties": { "words": { "type": "integer" } }, "required": ["words"] }))
+        .run(|ctx: ToolContext| async move {
+            let text = ctx.data["text"].as_str().unwrap_or("");
+            Ok(serde_json::json!({ "words": text.split_whitespace().count() }))
+        })
+}
+```
+
+The prelude re-exports the `serde_json` module and `Value` without the `json!` macro, so examples write `serde_json::json!`; add `use ferrite_app::serde_json::json;` if you prefer the short macro name.
+
+`ToolContext` carries the validated arguments (`data`, or `args::<T>()` for a typed struct), the call id, an `AbortSignal` that fires when the submission aborts, and a `Logger`. Returning `Err(ToolError)` hands the model an error result it can react to; a tool error never aborts the loop. A tool declared without an input schema advertises an open object and accepts extra arguments the model volunteers, so a zero-argument `check_fact` tool is not rejected when the model sends `{"fact": "..."}`.
+
+`run` accepts anything convertible into `ToolRun`: a `Value` or string becomes tool output, `ToolRun::none()` returns empty output, and `.terminating()` on a `ToolRun` asks the loop to stop after the current batch. When every result in a batch is terminating, the agent finishes without another model turn. `run` panics on an invalid tool definition when the module loads; call `try_run` to receive a `Result` instead.
+
+Three modifiers control how the runtime schedules and runs a tool:
+
+- `.sequential()` runs calls to this tool one at a time, never alongside other calls in the same batch.
+- `.durable()` persists the step's result before returning it, so a redelivered or resumed submission replays the saved output instead of running a mutating tool twice.
+- `.harness()` exposes the harness surface to the handler: `prompt(text, options)` runs a scratch conversation on the agent's model with the agent's own tools (file tools, skills, delegates, MCP, and custom tools, minus harness tools themselves) under the agent's compaction config, and `sandbox()` exposes the live workspace. Running a harness tool standalone fails with `tool_requires_harness`.
+
+The names `task`, `activate_skill`, `read_skill_resource`, `finish`, `give_up`, `search_tools`, and `enable_tool` are reserved by the framework.
+
+### Built-in families
+
+| Family | Tools | Notes |
+| --- | --- | --- |
+| `file_tools(sandbox)` | `read`, `write`, `edit`, `ls`, `glob`, `grep`, `delete` | Mounted automatically by `use_sandbox`; byte-bounded output (`read` 2000 lines / 50 KB, `grep` 100 matches / 64 KB, `glob` 1000 results, `ls` 500 entries) |
+| `web_fetch_tool(http)` / `web_search_tool(http, key)` | `web_fetch`, `web_search` | Fetch converts HTML to text; search queries Serper with a secret resolved per call |
+| `github_tools(http, token)` | `github_api`, `github_read_file`, `github_search_code`, `github_list_issues`, `github_create_issue` | Real HTTP verbs against `api.github.com`, including writes |
+| `github_read_tools(http, token)` | `github_read_file`, `github_search_code`, `github_list_issues` | Fixed GET shapes only; the model cannot pick a mutating verb or endpoint |
+
+Any agent that reads untrusted text (web pages, search results, public repositories) should receive `github_read_tools` instead of `github_tools`. Untrusted text can instruct the model to invoke tools, and `github_api` or `github_create_issue` would let prompt injection write with your deployment's GitHub token. The reference `assistant` enforces this boundary.
+
+Agents run without shell access. The default sandbox is the **Ferrite workspace**: file bodies live on Blob, the node index lives on Store, each agent instance gets an isolated namespace, and the file tools define everything the model can do there. Applications that use an external execution environment can attach it through the same `SandboxFactory` seam.
+
+The HTTP and secret handles come from the app environment. `app::http()` returns `Some` when the deployment grants at least one of the egress handles the SDK opens (`web-egress`, `github-egress`, and `mcp-egress` by default). Outbound requests to any destination outside the granted handles fail with an egress denial:
+
+```rust
+if let Some(http) = app::http() {
+    use_tool(web_fetch_tool(http.clone()));
+    use_tool(web_search_tool(http.clone(), app::secret("serper-api-key")));
+    for tool in github_read_tools(http, app::secret("github-token")) {
+        use_tool(tool);
+    }
+}
+```
+
+Evals and live test suites running outside `AgentApp::serve` can provide the same environment once via `app::install_env(AppEnv { http, secrets })`; the first environment installed in a process stands.
+
+## Skills
+
+A skill packages instructions that the model activates on demand via `activate_skill`, along with optional supporting files read via `read_skill_resource`. Build one in code with `SkillDefinition::new(name, description, instructions)`, or load a packaged `SKILL.md` (YAML frontmatter plus body) with `Skill::from_markdown`. The initial prompt lists only each skill's name and description, so long procedures consume no context tokens until the model activates them.
+
+## Subagents
+
+`define_subagent(name, description, function)` declares a delegate reachable through the framework `task` tool. Each delegation runs in a detached child session keyed by the tool call, while the delegate roster renders into the prompt and the `task` tool schema stays static so provider prompt caches remain valid. `general_subagent()` provides a ready-made explorer. Chain `.model(id)` and `.thinking_level(level)` on a `Subagent` to override parent settings for that delegate. `define_subagent` panics on an empty name or description; `try_define_subagent` returns the error instead. Delegation depth is capped at 4, and delegate renders reject root-only hooks.
+
+## MCP connections
+
+`define_mcp_connection(name, url)` mounts tools from a remote MCP server that speaks protocol revision `2026-07-28` over streamable HTTP. A server supporting only an earlier revision, such as `2025-11-25`, cannot be mounted: the revisions are incompatible on the wire and the SDK's client sends no `initialize` handshake. Check the server's revision before relying on it (see [Which clients can connect](/developers/mcp-servers/#which-clients-can-connect)), and mark the connection `.optional()` if the agent should still render when that server is unreachable. Mounted servers page through `tools/list` and join the tool set as `mcp__<server>__<tool>`.
+
+```rust
+let docs_token = app::secret("docs-mcp-token");
+use_mcp_connection(
+    define_mcp_connection("docs", "https://mcp.example.com/mcp")
+        .auth_resolver(move || docs_token())
+        .only_tools(&["search_docs", "read_page"])
+        .timeout_ms(30_000),
+);
+```
+
+`.bearer` sets a fixed token, `.auth_resolver` resolves one per call, `.header` adds a static header, `.only_tools` restricts mounted tools (and fails loudly if the server does not advertise a named tool), and `.optional()` allows rendering when the server is unreachable. Every MCP request obeys `.timeout_ms` (30 s by default). Every remote MCP host requires an egress grant in `ferrite.json`.
+
+## Dynamic tool discovery
+
+When an agent can choose from a large tool set, register catalogs instead of mounting every tool in the initial prompt:
+
+```rust
+use crate::agent_sdk::protocols::a2a::A2aCatalog;
+
+use_tool_catalog(Arc::new(StaticCatalog::new("reports", "Reporting tools", reporting_tools())));
+use_tool_catalog(Arc::new(McpCatalog::new(define_mcp_connection("crm", crm_url), "The CRM", http.clone())));
+use_tool_catalog(Arc::new(A2aCatalog::new("billing", "https://billing.example/.well-known/agent-card.json", http)));
+```
+
+The framework mounts `search_tools` (which ranks entries across all catalogs against a query) and `enable_tool` (which adds a chosen tool to the live set). Enabled tool names persist per instance and re-resolve on subsequent submissions; a previously enabled name that no catalog advertises anymore is reported rather than dropped without warning.
+
+## Structured results
+
+A caller can request typed output by sending a `resultSchema` with a message. The SDK mounts `finish` (returning a value matching the schema) and `give_up` (explaining why no value can be produced), validates the returned value, and sends a bounded number of follow-up reminders if the model stops without calling either tool. The validated result travels in both the submission record and the API reply.
+
+## Durable state and lifecycle hooks
+
+```rust
+pub fn triage(props: AgentProps) -> Instruction {
+    use_model("anthropic/claude-sonnet-4-6");
+    let (seen, set_seen) = use_persistent_state::<u32>("reports_seen", 0);
+    use_agent_finish(move |_ctx| {
+        let set_seen = set_seen.clone();
+        async move {
+            let _ = set_seen.set(seen + 1);
+        }
+    });
+    format!("You triage reports for instance {}. You have triaged {seen} so far.", props.id).into()
+}
+```
+
+`use_persistent_state` reads the latest durable value for the instance and returns a setter that writes a `state_write` record. The next render observes the new value. Because a state write mid-submission triggers a re-render before the next model turn, a tool that writes state can change the tool set inside the same submission, and the SDK narrates the diff to the model as a `resources` or `instructions` signal.
+
+`use_agent_start` runs before the model turn and is where you load per-conversation data once (`samples/guide/agent_hooks.rs`, `account_support`). `use_agent_finish` runs after the loop settles and may queue follow-up work as extra cycles; cycles are capped at 32 per submission and counted from durable records so the cap survives restarts. `use_response_start` and `use_response_finish` return metadata recorded on the submission and returned alongside the text, such as a model label for a client footer or the tool calls an eval harness inspects.
+
+## Conditional tools and phases
+
+Because the agent function renders before each submission and again before the next turn after a state write, available tools can track durable state. A tool that records an escalation can mount a follow-up tool on the next render. Alternatively, a phase machine built from `use_persistent_state` and `use_instruction` can keep every phase mounted behind a `guarded()` wrapper that refuses calls outside the active phase, so the tool schema stays constant while guards decide what runs. Both patterns live in `guide/agent_hooks.rs` and `support_desk/`; see [Agent Samples](/developers/agent-samples/).
+
+Bind identifiers the model must never choose (such as the instance id assigned by your backend or channel, or attributes from a verified signal) from trusted context rather than tool input (`guide/tools.rs`, `customer_orders`).
+
+## Custom hooks
+
+A custom hook is a plain Rust function that calls SDK hooks and returns instruction text. Use custom hooks to share behavior across agents:
+
+```rust
+fn use_escalation() -> &'static str {
+    use_tool(escalate_case());
+    "Escalate to a specialist only after you have confirmed the account and issue."
+}
+
+pub fn support_assistant() -> Instruction {
+    use_model("anthropic/claude-haiku-4-5");
+    let escalation = use_escalation();
+    format!("Answer customer support questions accurately. {escalation}").into()
+}
+```
+
+## Durability
+
+In the agent SDK, durable means an acknowledged write or message survives a crash, a restart, and a redeploy of your application. Every registered agent declares a retry budget and timeout for submissions (defaulting to 10 attempts within one hour):
+
+```rust
+Agent::new("issue_triage", issue_triage).durability(DurabilityConfig { max_attempts: 5, timeout_ms: 7_200_000 })
+```
+
+Inside a tool, `.durable()` and `ctx.step()?.do_(name, work)` checkpoint each step's result so an interrupted call replays completed steps instead of repeating mutations. See [Agent Runtime](/developers/agent-runtime/) for how interrupted submissions recover.
+
+## Schedules and channels
+
+A scheduled agent is an ordinary agent that receives a `schedule` signal, and a channel is a webhook handler that verifies a provider signature and dispatches a signal into the target conversation. Both call `AgentRuntime::dispatch`, which creates the instance with its initial data on first contact and continues it afterwards, keyed by the delivery's idempotency key. See [Agent Channels](/developers/agent-channels/).
+
+## Models and compaction
+
+Model ids follow the AI gateway's catalog format (`anthropic/claude-sonnet-4-6`, `openai/gpt-5.5`). The runtime derives context windows, maximum output limits, and compaction defaults from the model family, and compacts the conversation using pi's algorithm and prompts whenever the next turn would not fit. Call `use_model_with` to override the thinking level or compaction settings (`reserve_tokens`, `keep_recent_tokens`, or a separate model for summaries).
+
+## Testing an agent
+
+Every storage plane has an in-memory implementation paired with a scripted model provider, so you can test agent behavior without a running fleet. Build the test dependencies with `RuntimeDeps::in_memory(provider)`, create the runtime with `AgentRuntime::new(agents, deps, events)`, and send requests through `Router` against the same protocol faces a deployed app serves. Call `render_agent` to render an agent function without running it and assert on its model, tools, skills, and instructions. An eval scripts the model and checks the transcript or recorded metadata (for example verifying that a tool ran before the final answer, as in `samples/evals.rs`); against a live model, the same assertions run over the thread API.
+
+Continue with [Agent Runtime](/developers/agent-runtime/) for how renders execute and recover, [Agent API & Protocols](/developers/agent-api/) for how clients call deployed agents, and [Agent Samples](/developers/agent-samples/) for every pattern above as compiling Rust.

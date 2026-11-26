@@ -1,0 +1,34 @@
+---
+title: "Agents Ferrite works with"
+shortTitle: "Works with"
+description: "Which coding agents and chat apps have been run against Ferrite Cloud, what was run in each, and the date of the run."
+section: "Get started"
+order: 4.7
+---
+
+This page records the agents that have been run against Ferrite Cloud. Each row names one agent, how you add Ferrite to it, what was run on each route, and the date of that run. [Connect any agent to your Ferrite account](/developers/connect-any-agent/) has the full setup for every client, including the ones this table does not list.
+
+An agent can reach Ferrite by three routes, and the table has a column for each:
+
+- **Plugin** is the Ferrite plugin installed in the agent. It carries the Ferrite skill, the MCP server entry and the CLI installer.
+- **CLI** is the `ferrite` CLI installed on the same computer and registered as the agent's local MCP server with `ferrite mcp-serve`.
+- **Hosted MCP** is the remote server at `https://mcp.ferrite.cloud/mcp`, added to the agent's own configuration or as a connector, with sign-in through the browser.
+
+| Agent | Install | Plugin | CLI | Hosted MCP | Date checked |
+| --- | --- | --- | --- | --- | --- |
+| Claude Code | `claude plugin marketplace add iGentAI/ferrite-plugin`, then `claude plugin install ferrite@ferrite` | Installed the plugin from the public repository. The Ferrite skill and the `ferrite` MCP server are registered. | Deployed a poll from one prompt. Claude Code installed the CLI, opened a trial account and deployed; the live page counted a vote. | With the plugin installed the hosted server is connected and its tools are listed. Sign-in needs a browser: in a run without one, `account` asks for sign-in and Claude Code says to run `/mcp`. | 26 November 2026 |
+| claude.ai | **Customize > Connectors > Add custom connector**, named `Ferrite`, with **Sign in when needed**. See [Use Ferrite in Claude](/developers/claude/). | Not yet run | Not yet run | The custom connector lists all 76 tools. `explain_gate` and `search_docs` answer without an account. `account` opens Ferrite's sign-in and consent, and after it `account`, `owner_status`, `list_apps` and `estimate_cost` answer. | 17 November 2026 |
+| GitHub Copilot | `copilot plugin marketplace add iGentAI/ferrite-plugin`, then `copilot plugin install ferrite@ferrite` | Installed the plugin from the public repository in Copilot CLI. The Ferrite skill and the `ferrite` MCP server are registered. | Deployed a poll from one prompt in Copilot CLI. It installed the CLI, opened a trial account and deployed; the live page counted a vote. | With the plugin installed the hosted server is registered. Sign-in needs a browser: in a run without one, `account` asks for sign-in through Copilot's MCP authentication settings. | 26 November 2026 |
+| Codex | `codex plugin marketplace add iGentAI/ferrite-plugin`, then `codex plugin add ferrite@ferrite` | Installed the plugin from the public repository. The Ferrite skill and the `ferrite` MCP server are registered. | Deployed a poll from one prompt. Codex installed the CLI, opened a trial account and deployed; the live page counted a vote. | With the plugin installed the hosted server is registered. Sign-in needs a browser: `codex mcp login ferrite` prints the address to open. | 26 November 2026 |
+| ChatGPT | On the web, **Plugins**, then **+** and **Add custom MCP server**, named `Ferrite` with OAuth authentication | Not yet run | Not yet run | Not yet run | Not yet run |
+| Cursor | `"ferrite": {"url": "https://mcp.ferrite.cloud/mcp"}` under `mcpServers` in `~/.cursor/mcp.json` | Not yet run | Not yet run | Not yet run | Not yet run |
+| Antigravity | `agy plugin install https://github.com/iGentAI/ferrite-plugin` | Installed the plugin from the public repository. One skill, one rule and the `ferrite` MCP server are registered. | Deployed a poll from one prompt. Antigravity installed the CLI, opened a trial account and deployed; the live page counted a vote. | With the plugin installed the hosted server is registered. Sign-in needs a browser; the installer points to **Sign in** under `ferrite` in `/plugin`. | 26 November 2026 |
+| OpenCode | `opencode mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `opencode mcp auth ferrite` | OpenCode has no plugin format. | Deployed a poll from one prompt. OpenCode installed the CLI, opened a trial account and deployed; the live page counted a vote. | `opencode mcp add` registers the server and `opencode mcp list` shows it connected. Sign-in needs a browser. | 26 November 2026 |
+| JetBrains Junie | `"ferrite": {"url": "https://mcp.ferrite.cloud/mcp"}` under `mcpServers` in `~/.junie/mcp/mcp.json` | Not yet run | Not yet run | Not yet run | Not yet run |
+| Devin | `devin mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `devin mcp login ferrite` | Not yet run | Not yet run | Not yet run | Not yet run |
+| Warp | The Streamable HTTP entry in **Settings > Agents > MCP servers** with the URL `https://mcp.ferrite.cloud/mcp` and no headers | Not yet run | Not yet run | Not yet run | Not yet run |
+| Cline | `cline mcp add ferrite https://mcp.ferrite.cloud/mcp --transport http --yes` | Cline has no plugin format. | Deployed a poll from one prompt in Cline CLI. It installed the CLI, opened a trial account and deployed; the live page counted a vote. | `cline mcp add` registers the server. No tool was called through it. | 26 November 2026 |
+| Amp | `amp mcp add ferrite https://mcp.ferrite.cloud/mcp` | Amp has no plugin format. | Not yet run | `amp mcp add` registers the server and `amp mcp list` shows it. No tool was called through it. | 26 November 2026 |
+| Pi | `pi mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `/mcp` | Pi has no plugin format. | Deployed a poll from one prompt. Pi installed the CLI, opened a trial account and deployed; the live page counted a vote. | `pi mcp add` registers the server and `pi mcp list` shows its 78 tools. Sign-in needs a browser: `account` says to run `/mcp`. | 26 November 2026 |
+
+An agent that is not in this table connects the same way: paste the prompt from Ferrite's homepage, or add `https://mcp.ferrite.cloud/mcp` as a Streamable HTTP server with no headers.

@@ -1,0 +1,174 @@
+---
+title: "Routing"
+description: "Map public paths to declared bindings for static content, HTTP APIs, WebSockets, server-sent event streams, and gRPC services."
+section: "Build"
+order: 2
+---
+
+Your application never listens on a TCP port. Every external request enters
+through a route in `ferrite.json` that connects a public path prefix to one
+declared binding. The gateway terminates TLS and HTTP, enforces request limits,
+and hands the request off: `content` routes serve objects directly from a `blob`
+binding, while `api`, `ws`, `stream`, and `grpc` routes publish requests onto a
+queue your application reads. Because HTTP ingress rides request and reply
+queues, the gateway and your function instances scale independently.
+
+## Declare routes
+
+```json filename="ferrite.json"
+{
+  "services": [
+    { "name": "requests", "primitive": "queue",
+      "workload": { "read_qps": 20, "write_qps": 10, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "updates", "primitive": "queue",
+      "workload": { "read_qps": 20, "write_qps": 10, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "sessions", "primitive": "queue",
+      "workload": { "read_qps": 20, "write_qps": 10, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "web-assets", "primitive": "blob",
+      "workload": { "read_qps": 50, "write_qps": 5, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } }
+  ],
+  "applications": [{
+    "name": "storefront",
+    "artifact_key": "apps/storefront@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "requests", "kind": "queue", "service": "requests" },
+      { "handle": "updates", "kind": "queue", "service": "updates" },
+      { "handle": "sessions", "kind": "queue", "service": "sessions" },
+      { "handle": "web-assets", "kind": "blob", "service": "web-assets" }
+    ],
+    "routes": [
+      { "prefix": "/api/", "binding": "requests", "kind": "api" },
+      { "prefix": "/events", "binding": "updates", "kind": "stream" },
+      { "prefix": "/socket", "binding": "sessions", "kind": "ws" },
+      {
+        "prefix": "/",
+        "binding": "web-assets",
+        "kind": "content",
+        "key_prefix": "site/",
+        "public": true
+      }
+    ]
+  }]
+}
+```
+
+Declare a `workload` on every service ([App Manifest](/developers/app-manifest/)).
+The CLI fills defaults in for any service that omits one, whereas an unchanged
+spec submitted through raw `deploy_source` reserves a large default share of
+capacity per service and fails admission after the build runs if capacity is
+full.
+
+The gateway chooses a route in this order:
+
+1. WebSocket upgrades match against `ws` routes.
+2. gRPC calls (HTTP/2 `POST` requests with a gRPC content type) match against
+   `grpc` routes.
+3. All other requests match against `api` and `stream` routes by longest
+   matching prefix, regardless of declaration order in `ferrite.json`.
+4. Only when none of the above match does the gateway consult `content` routes.
+   Any request with a body sent to a `content` route returns `400`.
+
+Two routes in one application cannot share a prefix, except for one `ws` route
+and one `stream` route; admission refuses any other duplicate with
+`APP_ROUTE_PREFIX_DUPLICATE`. Because `api` routes match before
+`content` routes regardless of prefix length, an `api` route at `/` receives
+every request (including `GET /` and asset paths), so a `content` route is never
+consulted and a `404` from your application is final. Alloy serves its own
+`/assets/` paths for that reason. When you serve blob content alongside an API,
+give the `api` route a narrower prefix such as `/api/`.
+
+Do not declare a host on a route. Ferrite registers your routes under your
+application's subdomain and any custom domain you bind, preferring a route
+matched to the request host over a wildcard match.
+
+Caller headers stop at the gateway by default. Forward only the headers your
+handler requires, such as `accept`, `mcp-protocol-version`, or a provider
+signature header, by listing them in `forward_headers`:
+
+```json
+{ "prefix": "/api/", "binding": "requests", "kind": "api",
+  "forward_headers": ["accept", "stripe-signature"] }
+```
+
+Header forwarding applies to `api` and `grpc` routes only, up to 16 unique names
+and 512 bytes of header names in total. You cannot forward `host`, framing
+headers, or WebSocket handshake headers. Forwarded headers arrive lowercased in
+`IngressRequest.headers`. Because local `ferrite check` accepts more header
+names than the platform admits, run `ferrite check --remote` for the
+authoritative platform verdict ([Limits](/developers/limits/)).
+
+Fixed gateway bounds apply to every route. An `api` request body is at most
+256 KiB and `Transfer-Encoding: chunked` is refused; replies are capped at about
+4 MiB; and your application has 8 seconds on the recommended configuration to
+reply before the gateway returns `504`. An `api` route passes `GET`, `POST`,
+`PUT`, `PATCH`, and `DELETE` to your application and answers `OPTIONS`, `HEAD`,
+and `TRACE` with `405`. A `content` route serves `GET` and `HEAD`. See
+[Limits](/developers/limits/) for the complete table.
+
+## Content routes and `index.html`
+
+A `content` route serves static objects directly from Object Storage under
+`key_prefix`, so you can host static builds from Astro or Vite without invoking
+function code on asset requests. The gateway strips the route `prefix` and
+appends the remaining path to `key_prefix`. Both the route root and any path
+ending in `/` resolve to `<key_prefix><path>index.html`. With the manifest
+above:
+
+| Request | Blob key |
+| --- | --- |
+| `GET /` | `site/index.html` |
+| `GET /docs/` | `site/docs/index.html` |
+| `GET /app.js` | `site/app.js` |
+| `GET /docs` | `site/docs` (exact key; usually absent and returns `404`) |
+
+Content routes are private by default: without `"public": true`, the gateway
+serves objects only when the request includes a valid presigned token in its
+query string. Set `"public": true` on routes that serve a public site.
+
+The gateway does not redirect `/docs` to `/docs/`, and `index.html` is fixed as
+the directory index document. Upload each directory's `index.html` under the
+matching key and link directories with their trailing slash.
+
+## gRPC routes
+
+A `grpc` route turns the gateway into a gRPC server for one service. Set
+`prefix` to the service path `/{package}.{Service}/` and point `binding` at a
+queue, as you do for an `api` route:
+
+```json
+{ "prefix": "/acme.Orders/", "binding": "requests", "kind": "grpc",
+  "server_streaming": ["Watch"] }
+```
+
+The gateway handles HTTP/2 framing, trailers, and status codes, while your
+application receives raw message bytes and owns message encoding. Unary methods
+arrive as ordinary requests whose body is the request message and expect the
+reply message as the response body. Methods listed in `server_streaming` (at
+most 64) open a stream where your application publishes one frame per reply
+message on the queue named by `reply_to`. Compressed requests, client streaming,
+and bidirectional streaming are not supported. Local `ferrite check` does not
+recognize the `grpc` kind and reports it as unknown; run `ferrite check --remote`
+for the platform verdict, which admits it. Reply helpers are documented in the
+`ferrite_app::grpc` module.
+
+## Route security
+
+Platform enforcement of `rate_limit_per_min` is not active on Ferrite Cloud, so
+`ferrite deploy` and `ferrite cost` hold any manifest that carries the key and
+explain why. Keep the key if you already declared it rather than bypassing the
+hold through raw `deploy_source`. To enforce request budgets now, vendor the
+`http-route-budget` package (`ferrite add http-route-budget`) and call
+`http_route_budget::guard` right after decoding the request, before any handler
+effect. Because that budget is shared across every caller of the route, add
+application counters for per-user quotas ([Rate limits](/developers/rate-limits/)).
+
+Set response headers and cookies in the reply's `headers`; the gateway forwards
+at most 16 response headers and keeps only the first `set-cookie`
+([Headers & Cookies](/developers/headers-cookies/)). Admission refuses any route
+that names an undeclared binding, and any request header omitted from
+`forward_headers` never reaches your application.
+
+Next: configure request budgets in [Rate Limits](/developers/rate-limits/),
+response headers in [Headers & Cookies](/developers/headers-cookies/), or signed
+provider callbacks in [Webhooks](/developers/webhooks/).

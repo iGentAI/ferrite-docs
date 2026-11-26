@@ -1,0 +1,68 @@
+---
+title: "Connect any agent to your Ferrite account"
+shortTitle: "Connect any agent"
+description: "Paste one prompt into any agent, from a coding agent with a terminal to a chat app on your phone, start a trial without signing up, and bring every later agent into the same Ferrite account."
+section: "Get started"
+order: 4.6
+---
+
+Paste the prompt from Ferrite's homepage into any agent you use. It reads Ferrite's setup document, chooses the route that agent can take, and starts a trial: 48 hours with $50 of credit, without a sign-up. Every route ends on the same kind of account, and every later agent joins it with one sign-in. You never copy a token, a configuration file or a second prompt.
+
+## The first agent
+
+**A coding agent that can run a terminal** (Claude Code, Codex, Antigravity, Cursor, Gemini CLI, GitHub Copilot, OpenCode, Amp, Pi, Factory, Kiro, Goose, Cline and the like) installs the `ferrite` CLI, starts the trial with `ferrite login --ephemeral`, and registers the CLI as its local MCP server (`ferrite mcp-serve`). There is nothing to click.
+
+**An agent that can only use MCP**, such as one on a managed laptop where installing software is blocked, adds Ferrite's remote server to its own configuration:
+
+| Client | Command or entry |
+| --- | --- |
+| Claude Code | `claude mcp add --transport http --scope user ferrite https://mcp.ferrite.cloud/mcp` |
+| Codex (CLI, app and IDE extension) | `codex mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `codex mcp login ferrite` |
+| Antigravity (app, IDE and `agy`) | `agy mcp add ferrite https://mcp.ferrite.cloud/mcp`, then **MCP Servers > Authenticate** |
+| Gemini CLI | `gemini mcp add --transport http -s user ferrite https://mcp.ferrite.cloud/mcp` |
+| Cursor | `"ferrite": {"url": "https://mcp.ferrite.cloud/mcp"}` under `mcpServers` in `~/.cursor/mcp.json` |
+| VS Code with Copilot | `code --add-mcp '{"name":"ferrite","type":"http","url":"https://mcp.ferrite.cloud/mcp"}'` |
+| GitHub Copilot CLI | `copilot mcp add --transport http ferrite https://mcp.ferrite.cloud/mcp` |
+| Kiro | `kiro-cli mcp add --name ferrite --url https://mcp.ferrite.cloud/mcp --scope global` |
+| Devin Desktop (formerly Windsurf) | `devin mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `devin mcp login ferrite` |
+| Zed | `"ferrite": {"url": "https://mcp.ferrite.cloud/mcp"}` under `context_servers` in Zed's settings |
+| JetBrains Junie | `"ferrite": {"url": "https://mcp.ferrite.cloud/mcp"}` under `mcpServers` in `~/.junie/mcp/mcp.json` |
+| OpenCode | `"ferrite": {"type": "remote", "url": "https://mcp.ferrite.cloud/mcp"}` under `mcp.servers` in `~/.config/opencode/opencode.json`, then `opencode mcp auth ferrite` |
+| Cline | `cline mcp add ferrite https://mcp.ferrite.cloud/mcp --transport http --yes` |
+| Kilo Code | `kilo mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `kilo mcp auth ferrite` |
+| Amp | `amp mcp add ferrite https://mcp.ferrite.cloud/mcp` |
+| Pi | `pi mcp add ferrite --url https://mcp.ferrite.cloud/mcp`, then `pi mcp login ferrite` |
+| Factory Droid | `droid mcp add --type http ferrite https://mcp.ferrite.cloud/mcp` |
+| Goose, Continue, Warp, Qwen Code and others | the client's Streamable HTTP entry with the URL `https://mcp.ferrite.cloud/mcp` and no headers |
+
+Your browser then opens Ferrite's connect page. Click **Try Ferrite without an account** and the trial starts. The agent does not need this table: the [setup document](https://docs.ferrite.cloud/agent-setup/SKILL.md) gives it the local and remote entry for each of these clients and the rule for any other.
+
+**A chat app** (Claude, ChatGPT or Gemini, on the web or a phone) reaches Ferrite through a connector. Add Ferrite from the app's connector directory, or add a custom connector with the URL `https://mcp.ferrite.cloud/mcp`:
+
+| App | Custom connector |
+| --- | --- |
+| Claude | **Customize > Connectors > Add custom connector**, named `Ferrite`, authentication **Sign in when needed**. See [Use Ferrite in Claude](/developers/claude/). |
+| ChatGPT | On the web, **Plugins**, then **+** and **Add custom MCP server**, named `Ferrite` with OAuth authentication (older layout: **Settings > Apps > Advanced settings**, **Developer mode**, **Create app**). |
+| Gemini | On gemini.google.com in a browser, **Settings > Connected Apps > Add a custom app**, then **Next**; it then works in the phone app too. |
+
+The agent asks the app to connect Ferrite, you press **Connect**, and the same connect page opens with the same one click.
+
+## Keep the trial
+
+When you like what you built, tell the agent "keep this". It gives you a private claim link. Sign in with Google or GitHub and choose **Keep this as my account**: the trial becomes a permanent account of your own, with the same apps, URLs and data and no deadline. Its ID changes from `eph-…` to a readable one, and the CLI login and every connected agent follow it without reconnecting. See [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
+
+## Every later agent
+
+| Where the agent runs | How it joins your account |
+| --- | --- |
+| The same computer, with the CLI | It finds the stored login and works in your account at once. |
+| Another computer, with the CLI | It starts a trial by default and tells you it can connect to your account instead: `ferrite login --sign-in` opens the browser, you continue with Google or GitHub, pick the account and click **Allow**. |
+| Any connector or remote MCP server, on any device | On the connect page, choose **Sign in to your Ferrite account**, continue with Google or GitHub, pick the account and click **Allow**. |
+
+If you say "I already have an account" in the middle of a conversation on a trial, the agent gives you the claim link instead. After you sign in, choose **Move it into** your account: the trial's apps move there with their URLs and data, and the agent's connection follows, so it carries on in your account without reconnecting. Choose **Keep this as my account** if this trial should become the account.
+
+Each agent you connect is listed in the Dashboard under **Connected agents** on its own. There you can move one to another account you own or revoke it without touching the others. To start a fresh trial or use a different account from an agent, disconnect Ferrite in that agent and connect it again. A machine with no browser at all, such as a CI job, uses a named token from **Settings > API tokens** with `ferrite login --credentials-file <path>`.
+
+## Check where an agent is working
+
+Ask the agent to call `account`, or run `ferrite account` in a terminal, and compare the account ID with the one in the Dashboard's address (`/a/ACCOUNT_ID/`). See [Check which account you are using](/kb/guide/check-which-account-you-are-using/).

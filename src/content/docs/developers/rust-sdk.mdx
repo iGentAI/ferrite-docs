@@ -1,0 +1,158 @@
+---
+title: "Rust SDK"
+description: "Use AppContext, service handles, ingress envelopes, clocks, secrets, notifications, and outbound HTTP in Ferrite Rust applications."
+section: "Reference"
+order: 3
+---
+
+Your Ferrite application depends on `ferrite-app` alone; shared libraries enter
+your crate as source packages through `ferrite add`. At startup, the runtime
+hands your code an `AppContext` populated exclusively with handles for the
+services, routes, and outbound destinations declared in `ferrite.json`. The
+admission gate rejects code that references standard library networking,
+filesystem, process, environment, thread, or system-clock modules. Static source
+checking filters disallowed imports before compilation, while OS containment
+enforces the runtime boundary. The handles, clock, and async runtime in
+`ferrite-app` are the only I/O primitives available to your code.
+
+## Application entry point
+
+```rust filename="src/main.rs"
+#![forbid(unsafe_code)]
+
+use std::io;
+use ferrite_app::{app_main, AppContext, FerriteApp};
+
+struct Worker;
+
+impl FerriteApp for Worker {
+    async fn run(ctx: AppContext) -> io::Result<()> {
+        let mut jobs = ctx.queue("jobs")?;
+        loop {
+            let Some(lease) = jobs.poll_wait(1_000).await? else { continue };
+            // Apply an idempotent effect before acknowledging the lease.
+            jobs.ack(lease.token).await?;
+        }
+    }
+}
+
+fn main() { app_main::<Worker>() }
+```
+
+Every application implements `FerriteApp` and starts through `app_main`. The
+name passed to `ctx.queue("jobs")` must match a `queue` binding declared in
+`ferrite.json`; a missing or mismatched handle returns an error.
+
+## Service handles
+
+| SDK call | What it provides |
+| --- | --- |
+| `ctx.store("name")` | Linearizable key-value reads, writes, deletes, and compare-and-swap. |
+| `ctx.ape("name")` | Guarded multi-key transactions. |
+| `ctx.queue("name")` | Leased work items with delayed delivery, acknowledgements, retries, and redelivery if the holding process stops. |
+| `ctx.log("name")` | Ordered append and offset reads. |
+| `ctx.topics("name")` | Named ordered streams within one `log` binding. |
+| `ctx.blob("name")` | Content-addressed object reads and writes. |
+| `ctx.egress("name")` | Outbound HTTP to declared `https://` destination prefixes. |
+
+## Ingress and replies
+
+An `api` route publishes each incoming HTTP request as an `IngressRequest` on
+its bound Queue. Decode the envelope, execute an idempotent handler, publish an
+`IngressReply` to `request.reply_to`, and acknowledge the lease only after the
+reply publish succeeds:
+
+```rust filename="src/api.rs"
+use ferrite_app::{serde_json, AppContext, IngressReply, IngressRequest};
+
+let request: IngressRequest = serde_json::from_slice(&lease.payload)?;
+let reply = IngressReply::to(&request, 200, br#"{"ok":true}"#.to_vec());
+let mut replies = ctx.reply_to_queue(&request.reply_to).await?;
+replies.publish(&serde_json::to_vec(&reply)?).await?;
+requests.ack(lease.token).await?;
+```
+
+In the platform build, `AppContext` also exposes `ctx.ingress(&lease.payload).await?`.
+It decodes the envelope and, for `ws` opens or `stream` subscriptions, registers
+which instance owns the session so a redeploy closes sessions held by the
+retiring generation. On an `api` route it performs only the decode. The local
+SDK vendored by `ferrite new` does not declare `ctx.ingress`, so code that calls
+it compiles on the platform and fails `ferrite check` locally. Decode directly
+with `serde_json::from_slice` when you want local checks to pass.
+
+`IngressReply::to` copies the request's correlation ID into the reply. Place
+response headers in the reply's `headers` list; the gateway forwards at most 16
+headers, strips headers it manages (`content-length`, `connection`,
+`transfer-encoding`, other HTTP framing headers, `x-correlation-id`,
+`access-control-allow-origin`, and any `sec-websocket-*` header), and keeps only
+the first entry when a header name repeats.
+
+Beyond `method`, `path`, `body`, and `reply_to`, `IngressRequest` carries four
+fields you will use in handlers:
+
+- `idempotency_key` holds the caller's `idempotency-key` header when present, or
+  the correlation ID otherwise.
+- `deadline_ms` holds the absolute epoch-millisecond reply deadline; once it
+  passes, the gateway has already returned `504` to the caller.
+- `headers` holds the route's forwarded request headers with lower-cased names.
+- `verified_host` holds the `Host` value under which the gateway served the
+  request, when the request named one.
+
+Queue delivery is at least once and the platform performs no request
+deduplication, so deduplicate side effects yourself by `idempotency_key`. In
+tests, construct envelopes with `IngressRequest::new(method, path, body)` and
+`IngressReply::new(correlation_id, status, body)` instead of struct literals,
+which break whenever a new field is added to the envelope.
+
+## Platform utilities
+
+| Call | What it gives you |
+| --- | --- |
+| `ctx.clock()`, `ctx.now_ms()` | The injected platform clock; standard library system clocks are refused by the admission gate. |
+| `ctx.secret("name")`, `ctx.secret_names()` | The value of a configured secret (`Option<String>`) and the list of configured secret names. |
+| `ferrite_app::rt` | Task spawning, channels, `select`, sleep, intervals, and timeouts. `ferrite_app::sleep_ms` sleeps for a millisecond duration. |
+| `ctx.instance()`, `ctx.generation()` | The running instance identifier and its current deployment generation. |
+| `ctx.notify(severity, kind, body)` | An entry in the account owner's notification feed (`severity` is `info`, `warn`, or `error`; `body` is capped at 2,048 bytes). `ctx.notify_deduped` adds a deduplication key so a retried call posts once. |
+| `ctx.egress("name")` | Buffered calls `deliver`, `deliver_http` (GET, POST, PUT, PATCH, or DELETE with headers), and `get`, plus streaming variants `deliver_stream`, `deliver_stream_http`, and `get_stream`, scoped to the handle's declared prefixes. |
+| Re-exports | `serde`, `serde_json`, and `tracing`. |
+| `ferrite_app::crypto` | SHA-256, HMAC-SHA-256, `hex`, base64, JWT signing and verification, Ed25519, RS256, and ES256 signature verification, JWKS key sets, and constant-time comparison `ct_eq`. |
+
+`ctx.secret("name")` returns `Option<String>`: the secret value when set before
+the deploy, or `None` when absent. Secrets are write-only through the control
+plane, so no read API returns a stored value. At runtime your process holds the
+plaintext value in memory and can call out only to declared egress destinations.
+Keep secret values out of logs, responses, and storage. A value updated with
+`ferrite secrets set` reaches running instances on the next deploy; see
+[Secrets & Egress](/developers/secrets-egress/#what-this-does-not-stop) for the
+remaining responsibilities in your code.
+
+The platform's `ferrite-app` crate exports `sha256`, `hmac_sha256`, `ct_eq`, `hex`, base64, and JWT/signature keys only — it intentionally omits `random_bytes`, `random_fill`, `random_token`, `random_u64`, `EntropyHandle`, password hashing, and cookie helpers (and `code_gate` refuses `rand`, `getrandom`, and `std::fs`). Never import `ferrite_app::crypto::random_*` or `AppContext::entropy`: the local CLI SDK twin still exposes a few legacy names (`AppContext::entropy`, `crypto::random_*`, `crypto::EntropyHandle`, `crypto::constant_time_eq`, `crypto::password_*`) that compile locally and fail the Cloud build with `E0432`. Run `ferrite check --target upstream` to catch them before deploying.
+
+Use one of two Cloud-safe entropy patterns instead:
+
+1. **Recommended (`sha256-hmac` package):** run `ferrite add sha256-hmac` (or pass `"packages": ["sha256-hmac"]` to MCP `deploy_source`) and call `crate::crypto::random_bytes(32)?`, `crate::crypto::random_token(32)?`, `crate::crypto::password_hash`, and `crate::crypto::constant_time_eq`. Add `__Host-` session cookies through `http-cookies`.
+2. **Zero-package inline (single-file MCP app):** derive 32 OS-CSPRNG bytes directly from `Ed25519SigningKey::generate_pkcs8()` (backed by `ring::rand::SystemRandom`) reduced through `hmac_sha256`:
+
+```rust
+use ferrite_app::crypto::{base64url_encode, hmac_sha256, Ed25519SigningKey};
+
+fn random_token(label: &[u8]) -> String {
+    let key = Ed25519SigningKey::generate_pkcs8();
+    let bytes = hmac_sha256(&key, label);
+    base64url_encode(&bytes)
+}
+```
+
+## Dependencies and state
+
+Application processes keep no durable local state and have no access to a
+filesystem, environment variables, subprocesses, raw sockets, or OS threads.
+Store all persistent state in the Key-value Store, Transactions, Queues,
+Streams, or Object Storage through handles injected by `AppContext`. Crates from
+crates.io cannot be added to `Cargo.toml`: install shared capabilities as source
+packages via `ferrite add`, or write and vendor gate-compliant Rust source
+directly inside your crate.
+
+Continue with [App Manifest](/developers/app-manifest/) to declare service
+bindings or [Functions](/developers/functions/) for process lifecycle and
+scaling.

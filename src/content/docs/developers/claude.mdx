@@ -1,0 +1,55 @@
+---
+title: "Use Ferrite in Claude"
+shortTitle: "Claude"
+description: "Connect claude.ai, the Claude desktop and mobile apps, or Claude Code to Ferrite, try it without an account, or sign in to the account you already have."
+section: "Get started"
+order: 4.5
+---
+
+Ferrite's hosted MCP server at `https://mcp.ferrite.cloud/mcp` gives Claude direct tools to check, deploy, and operate Ferrite applications. Connect it once for claude.ai, Claude desktop, and Claude mobile, or install the CLI to connect Claude Code locally. Every route reaches the same Ferrite account.
+
+## claude.ai, Claude desktop and Claude mobile
+
+All three apps share one connector list, so adding Ferrite once enables it everywhere.
+
+1. In claude.ai, open **Customize > Connectors**. Add Ferrite from the connector directory and press **Connect**, or choose **Add custom connector** and add one named `Ferrite` with the URL `https://mcp.ferrite.cloud/mcp`.
+2. For a custom connector, continue to the authentication step.
+3. Under **Authentication**, choose **Sign in when needed**. Claude preselects **No sign-in** because Ferrite's docs and checking tools answer anonymously; leaving **No sign-in** selected blocks every tool that requires an account. Keep **Use Claude's published identity** as the OAuth client, then add the connector.
+4. Start a conversation and ask Claude to build or deploy something on Ferrite.
+
+Claude can read documentation, check a specification, and check source code without an account. The first time Claude calls a tool that needs an account, it opens Ferrite's connect page, which shows the address of the client document Claude identifies itself with and the host the connection returns to (`claude.ai`). It offers two ways in:
+
+- **Try Ferrite without an account** starts a trial at once: 48 hours, $50 of credit, no sign-in. Ask Claude for the claim link whenever you want to keep it.
+- **Sign in to your Ferrite account** is for an account you already have. Continue with Google or GitHub; the Dashboard's consent page then names the application asking (Claude). Pick the account and click **Allow**. Claude then works in that account, with the apps you deployed from any other agent.
+
+Claude keeps the connection signed in and renews it every hour. Because Claude shares one connector across the web, desktop and mobile apps and Claude Code, you connect once.
+
+## Claude Code
+
+Run the shell installer to put the `ferrite` CLI on your machine and register Ferrite's MCP server in Claude Code with the same login as the CLI:
+
+```bash
+curl -fsSL https://downloads.ferrite.cloud/install.sh | sh
+```
+
+See [Set up coding agents](/developers/plugin/) for what the installer configures and how to verify it.
+
+On a machine where you cannot install software, add Ferrite's remote server instead and sign in from Claude Code's `/mcp` menu, which opens the same connect page:
+
+```bash
+claude mcp add --transport http --scope user ferrite https://mcp.ferrite.cloud/mcp
+```
+
+## Keep a trial or join your account
+
+On a trial, tell Claude "keep this" or "I already have an account". Claude calls `claim_url` and gives you a private link. After you sign in with Google or GitHub, the page offers **Keep this as my account**, which makes the trial a permanent account of your own with the same apps, URLs and data and no deadline (its ID changes from `eph-…` to a readable one), or **Move it into** an account you already own, which moves the apps there. Either way Claude's connection follows them, so you do not reconnect.
+
+To move Claude's connection to another account you own, or to revoke it, use **Connected agents** in the Dashboard. To sign in to a different account or start a fresh trial, open **Customize > Connectors**, disconnect Ferrite, connect it again, and choose on Ferrite's connect page. See [Connect any agent to your Ferrite account](/developers/connect-any-agent/) and [Check which account you are using](/kb/guide/check-which-account-you-are-using/).
+
+## What Claude sends to Ferrite
+
+Claude sends Ferrite only the source files, application specification, and requests needed for the operation you asked for; Ferrite reads nothing else from your conversation. See the [privacy page](https://ferrite.cloud/privacy) for what Ferrite records about an account, or write to info@igent.ai for help.
+
+## If it does not work
+
+If a tool returns `Unauthenticated`, Claude passed a `token` argument left over from an earlier session. Ask Claude to call `account` with no token so it uses the connector's sign-in.

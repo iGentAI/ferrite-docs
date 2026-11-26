@@ -1,0 +1,705 @@
+---
+title: "Authentication"
+description: "Add GitHub and Google sign-in to a Ferrite application with the auth package: PKCE OAuth over declared egress, store-backed sessions, access lists, and CSRF protection."
+section: "Security"
+order: 1
+---
+
+Ferrite Core provides no managed user authentication. Its gateway tracks no user
+sessions and forwards no verified user identity to your application. When your
+product needs end-user accounts, you add them directly to your crate with the
+`auth` source package (`ferrite add auth`). The package runs OAuth 2.0
+authorization code with PKCE against GitHub or Google over your declared egress
+handle, keeps opaque sessions in your application's key-value store behind a
+single `__Host-` cookie, checks every signed-in user against an access list,
+and enforces origin and CSRF validation on state-changing requests.
+
+Keep platform sign-in and application sign-in distinct. Signing in to the CLI,
+Dashboard, or MCP authenticates you as the operator who deploys and manages
+applications. The `auth` package manages accounts for your application's own
+users, stored in your application's own code and data.
+
+Sign-in proves identity, and the required access list decides who may enter your
+application: set `auth_allow` to `*` for a public shop open to any GitHub or
+Google account, or specify a domain or user list for an internal tool. What a
+signed-in person can do inside your application (roles, resource ownership, and
+tenant membership) belongs to your application's
+[Authorization](/developers/authorization/). The `auth` package handles browser
+sign-in through GitHub and Google; for app-issued passwords in an Alloy app,
+use `alloy-auth` ([Packages](/developers/packages/)), and review
+[What the package does not do](#what-the-package-does-not-do) before designing
+around SAML, SCIM, or remote MCP callers.
+
+## Add accounts to an application
+
+This walkthrough builds a small shop whose catalogue is public and whose account
+and checkout pages require a signed-in customer. Every step works from the CLI
+or over an MCP-only connection; MCP differences appear beside each step.
+
+### 1. Scaffold and add the package
+
+```bash
+ferrite new webapp corner-shop --with-tests
+cd corner-shop
+ferrite add auth
+```
+
+`--with-tests` adds the `ferrite-app-test` development dependency used in
+[Test a signed-in page](#test-a-signed-in-page). `ferrite add` reads the
+package registry of the installation you are logged in to; before logging in,
+pass `--registry https://packages.ferrite.cloud/registry.json`.
+
+`ferrite add auth` copies the package source into `src/auth/` and writes
+`src/auth/SETUP.md` with the manifest, secret, and provider steps below.
+Because the package compiles directly into your crate as vendored source, your
+`Cargo.toml` keeps a single production dependency (`ferrite-app`). Do not edit
+files under `src/auth/`; a future `ferrite add auth --force` overwrites them.
+
+Over an MCP-only connection with no shell, call `read_package {"name": "auth"}`
+where `tools/list` includes `read_package` to inspect the setup guide and
+required crate-root lines. Pass `"packages": ["auth"]` to `code_gate`,
+`deploy_source`, and `rcs_commit`; the server mounts the same files under
+`src/auth/` before checking or building your source
+([Packages](/developers/packages/)).
+
+### 2. Declare what the package needs in `ferrite.json`
+
+The gateway drops any request header omitted from `forward_headers`, and egress
+blocks any host omitted from `egress`. Your manifest needs a route forwarding
+the headers `auth` inspects, a `store` binding for sessions, and an `egress`
+block naming the provider endpoints:
+
+```json
+"routes": [
+  {
+    "prefix": "/",
+    "binding": "requests",
+    "kind": "api",
+    "forward_headers": ["cookie", "origin", "sec-fetch-site", "sec-fetch-user", "sec-fetch-mode", "sec-fetch-dest", "x-csrf-token", "accept", "content-type"]
+  }
+],
+"egress": [
+  {
+    "handle": "auth-providers",
+    "destinations": [
+      "https://github.com/login/oauth/access_token",
+      "https://api.github.com/user",
+      "https://api.github.com/user/emails",
+      "https://oauth2.googleapis.com/token",
+      "https://www.googleapis.com/oauth2/v3/certs"
+    ]
+  }
+]
+```
+
+The `webapp` template maps `/` to a `content` route backed by its `site` blob
+binding, which the gateway serves without running your handler. Replace that
+route with the `api` route above so every public and gated page reaches your
+code in step 3. Keep the template's `/health` route. If any endpoint under
+`/api/` requires a signed-in user, give it the same `forward_headers` list; a
+route that omits `cookie` never receives a session.
+
+Include only the destinations for providers you enable: the first three belong
+to GitHub and the last two belong to Google. Bind an ordinary `store` service
+for sessions (named `state` in the handler below). Because the `webapp`
+template binds `state` to an `ape` service for its sample counter, either change
+that service's `primitive` and binding `kind` to `store`, or add a separate
+`store` binding and pass its handle to `ctx.store`. Leaving `state` bound to
+`ape` causes every request opening `ctx.store("state")` to return the `503`
+shown in step 3.
+
+Forwarding `content-type` lets plain HTML forms pass the CSRF check
+([Forms and the CSRF check](#forms-and-the-csrf-check)). Forwarding
+`sec-fetch-user`, `sec-fetch-mode`, and `sec-fetch-dest` lets a user-initiated
+same-site navigation (such as a redirect through a sign-in broker) start
+sign-in directly; without them, the browser is redirected back to the sign-in
+page for another click. In an Alloy application, give `/__alloy/` the same
+`forward_headers` list as `/`.
+
+On `GET /auth/start/<provider>`, the package returns `403` when neither
+`sec-fetch-site` nor `origin` reaches your application (so a bare `curl` is
+refused), redirects cross-site or passive same-site requests to `/auth/sign-in`,
+and returns `429` once starts exceed `AuthOptions::max_starts_per_minute`
+(`300` by default).
+
+### 3. Decide which pages need a signed-in person
+
+The gateway does not reject unauthenticated requests before your code runs, so
+call order in your handler defines which routes are public. Handle `/health`
+and any independently authenticated routes (such as signed payment webhooks)
+first. Let `auth.handle` serve the package's own routes next, match an explicit
+allowlist of public paths, and place `auth.gate` in front of everything else.
+Any path you omit from the public list, including nonexistent paths, then asks
+for sign-in instead of leaking a route you meant to protect.
+
+```rust
+async fn answer(ctx: &AppContext, request: &IngressRequest) -> IngressReply {
+    let (path, _) = auth::query::split_target(&request.path);
+    if path == "/health" {
+        return IngressReply::to(request, 200, b"ok".to_vec());
+    }
+    // The pages the shop shows to everyone: the catalogue, a product page and
+    // the llms.txt that describes the shop to assistants.
+    let public = matches!(path, "/" | "/llms.txt") || path.starts_with("/products/");
+    let config = match auth::AuthConfig::from_secrets(ctx) {
+        Ok(config) => config,
+        // While a secret is missing or malformed: the public pages answer for
+        // everyone, and everything else names the secret.
+        Err(_) if public => return catalogue(ctx, request, path, None).await,
+        Err(error) => return auth::unconfigured(request, &error),
+    };
+    let Ok(store) = ctx.store("state") else {
+        return IngressReply::to(request, 503, b"no store binding named 'state'".to_vec());
+    };
+    let mut providers = auth::Providers::open(ctx, auth::setup::EGRESS_HANDLE);
+    let now = ctx.now_ms();
+    let mut auth = auth::Auth::new(config, store);
+    // The package's own routes: sign-in, the provider callbacks, the session
+    // document, sign-out, and the access-list page.
+    if let Some(reply) = auth.handle(request, &mut providers, now).await {
+        return reply;
+    }
+    if public {
+        let visitor = auth.session(request, now).await.ok().flatten();
+        return catalogue(ctx, request, path, visitor.as_ref()).await;
+    }
+    // Everything else belongs to a signed-in customer: the account page, the
+    // saved addresses, the basket and checkout.
+    let session = match auth.gate(request, now).await {
+        Ok(session) => session,
+        Err(reply) => return reply, // 303 to sign-in, 401, 403 or 503
+    };
+    // Per-customer state hangs from the subject: github:583231, google:1049…
+    let customer = format!("customers/{}", session.subject().key());
+    account(ctx, request, path, &session, &customer).await
+}
+```
+
+`Auth::gate` builds its own refusal replies. An anonymous browser navigation
+receives a `303` redirect to `/auth/sign-in` with the current path in
+`return_to`, so the customer lands back where they started after signing in.
+Any other anonymous request receives `401` with `{"error":"sign_in_required"}`.
+A signed-in user rejected by the access list receives a `403` page naming the
+account they signed in with, or `{"error":"not_on_access_list"}` for non-page
+callers. State-changing requests must also pass the origin and CSRF checks
+below.
+
+`Auth::session` returns `Ok(None)` for anonymous visitors and for users removed
+from the access list, and returns `Err` only when the store is unavailable. In
+the handler above, public pages read `auth.session` to show "Sign in" to a
+visitor or "Your account" to a signed-in customer without failing the page on a
+store error. `auth::unconfigured` answers browser navigations with a `503`
+setup page that names the missing secret and lists the setup steps, and answers
+non-browser callers with the same message as plain text. `auth::Providers::open`
+holds either the egress handle or the reason it is unavailable, so an app
+deployed without the `egress` block still serves every route except the
+provider callback.
+
+Alloy applications apply the same gate and pass its replies through
+`AlloyError::reply`; see
+[Sign-in for Alloy applications](/developers/authentication-alloy/). Any route
+authenticated another way, such as a signed payment webhook, belongs before
+`Auth::gate` and validates its own credential.
+
+### 4. Find the application's address
+
+Setting up sign-in takes a single deploy. Both `auth_public_origin` and your
+OAuth provider callback URLs require the application's public hostname, and
+Ferrite derives that hostname deterministically from `<account>/<name>` and the
+installation's app domain before the first deploy. Run `ferrite host` to print
+it:
+
+```bash
+ferrite host
+```
+
+```text
+app:      <account>/corner-shop
+host:     <host>  (derived)
+origin:   https://<host>
+          derived before the first deploy from the app id ...
+callback: https://<host>/auth/callback/github
+          https://<host>/auth/callback/google
+```
+
+Use `https://<host>` with no trailing slash for `auth_public_origin`, and
+register the two printed callback URLs with your providers. `ferrite add auth`
+prints the same origin and callback URLs along with one `ferrite secrets set`
+command for each secret not yet set. The host status reads `derived` before the
+first deploy and `confirmed` afterward; pass `--json` for one object with
+`origin` and `callbacks`. The CLI reads the app domain from your MCP endpoint
+(`https://mcp.<domain>/mcp`). For an endpoint without that pattern (such as a
+local fleet), set `FERRITE_APP_DOMAIN` to the fleet's application domain.
+
+Over an MCP-only connection, call `app_host` with the application name where
+`tools/list` includes it. It returns the derived host, origin, and callback
+URLs before the first deploy. After a deploy, `build_status` and `list_apps`
+report the assigned host; use their host if the two ever differ.
+
+Where `tools/list` has no `app_host`, you can compute the hostname the same way
+the platform does: `<shortcode>.<domain>`, where `<domain>` is the MCP endpoint
+host without its `mcp.` label and `<shortcode>` is the first 80 bits of the
+SHA-256 digest of `<account>/<name>` (using the account ID reported by
+`account`), read as a big-endian integer and formatted as 16 lowercase base-36
+digits (`0-9a-z`). If you prefer not to compute it, deploy once without secrets,
+read `host` from `build_status` or `list_apps`, set the secrets in step 6, and
+deploy again; until then the catalogue serves normally and gated routes return
+`503` naming the first missing secret.
+
+### 5. Register the OAuth clients
+
+OAuth providers redirect users only to callback URLs registered in advance on
+your host. Use the exact URLs `ferrite host` printed.
+
+For GitHub, create an OAuth App under Settings > Developer settings > OAuth
+Apps. Set the homepage URL to `https://<host>` and the authorization callback
+URL to:
+
+```text
+https://<host>/auth/callback/github
+```
+
+The package requests the `user:email` scope to read the primary email address
+GitHub marks verified.
+
+For Google, create an OAuth client of type "Web application" with this
+authorized redirect URI:
+
+```text
+https://<host>/auth/callback/google
+```
+
+The package requests `openid email profile` and verifies the returned ID token
+against Google's published keys. To keep a redirect URI already registered
+under another path, configure it in `AuthOptions::callback_paths`.
+
+### 6. Set the secrets
+
+`ferrite secrets set <name>` reads the value from standard input and disables
+echo at an interactive terminal so credentials never enter shell history.
+`ferrite secrets list` displays names only and never returns values. Over MCP
+without the CLI, call `set_secret`. Both work before the first deploy.
+
+Secrets are write-only to tools and APIs. At deploy time, Ferrite delivers them
+to the running process, where `auth` reads them with `ctx.secret`. Your own
+code runs in the same process and holds access to those values, so keep secrets
+out of replies and logs ([Secrets & Egress](/developers/secrets-egress/)).
+
+```bash
+printf '%s' 'https://<host>' | ferrite secrets set auth_public_origin
+openssl rand -base64 48 | ferrite secrets set auth_session_key
+printf '%s' '*' | ferrite secrets set auth_allow
+ferrite secrets set auth_github_client_id        # paste the client id
+ferrite secrets set auth_github_client_secret    # paste the client secret
+```
+
+The commands printed by `ferrite add auth` already fill in your derived origin.
+
+| Secret | Value |
+| --- | --- |
+| `auth_public_origin` | The origin `ferrite host` prints, `https://<host>`: lowercase with no path and no trailing slash. Because the gateway sends no host header, this is the sole source for callback URLs and origin checks. Binding a custom domain requires updating this secret and your provider callbacks. |
+| `auth_session_key` | At least 32 random bytes generated fresh for this application (for example with `openssl rand -base64 48`). Keys CSRF tokens and OAuth `state`; never reuse across apps and never commit to source. Rotating it signs everyone out. |
+| `auth_allow` | Who may sign in. Required: `*` for a public shop open to any customer, or a domain or user list for an internal tool; see [the access list](#the-access-list). |
+| `auth_github_client_id`, `auth_github_client_secret` | GitHub OAuth app credentials, if you enable GitHub sign-in. |
+| `auth_google_client_id`, `auth_google_client_secret` | Google OAuth client credentials, if you enable Google sign-in. |
+| `auth_admins` | Optional: accounts allowed to add and remove access-list entries and invites at `/auth/access` without redeploying. |
+| `auth_dev_mode` | Plain-HTTP local development or local fleet only; see [Local development](#local-development). Never set on a public Ferrite installation. |
+| `auth_dev_sign_in` | Only alongside `auth_dev_mode` on a local plain-HTTP fleet with no OAuth client; see [Local development](#local-development). Configuration error on any `https://` origin. |
+
+Setting a provider's client ID enables that provider and makes its client
+secret required. At least one provider must be configured. Until configuration
+is valid and complete, gated routes return `503` naming the first missing or
+malformed secret, never its value.
+
+Never put credentials or fallback values in source code, such as
+`ctx.secret("auth_session_key").unwrap_or(...)`. A fallback turns a forgotten
+secret into a public key anyone reading the source holds and masks the `503`
+that would otherwise report the missing configuration.
+
+### 7. Deploy once and check
+
+```bash
+ferrite check
+ferrite deploy
+```
+
+`ferrite check` compiles locally against the SDK vendored in
+`vendor/ferrite-app` so compile errors surface before you pay for a platform
+build. `ferrite deploy` builds on the platform against upstream `ferrite-app`
+and binds every configured secret into the new process. Secrets reach running
+processes only through a deploy.
+
+While any secret required by `auth` is unset, `ferrite deploy` refuses to
+submit (`DEPLOY_AUTH_SECRETS_MISSING`) and prints the command to set each one.
+Pass `--allow-missing-secrets` to submit anyway; gated routes return `503`
+until you set the secrets and deploy again. When the deploy finishes, the CLI
+prints `host: https://<host>/` to confirm the derived host; if the deployed
+host ever differs, the CLI warns you so you can update `auth_public_origin` and
+your provider callbacks. After changing a secret with `ferrite secrets`, plain
+`ferrite deploy` submits a new build even with unchanged source. After changing
+a secret through MCP `set_secret`, pass `ferrite deploy --force` because the
+CLI did not observe that edit.
+
+Without the CLI, call `set_secret` for each secret, submit once with
+`deploy_source`, and follow the build with `build_status`. Because
+`deploy_source` is not idempotent, never resubmit after a lost reply without
+reconciling first
+([MCP-only operations](/developers/mcp-only-operations/)).
+
+Verify the deployed routes. Without a cookie, `/` answers `200` and `/llms.txt`
+returns its text, while `/account` and `/checkout` return `303` redirects to
+`/auth/sign-in?return_to=%2Faccount` and `/auth/sign-in?return_to=%2Fcheckout`.
+Non-HTML requests to those gated routes return `401`. Confirm that
+`/auth/sign-in` links each configured provider, signing in from `/account`
+returns you to `/account`, and signing in with a disallowed account displays
+the no-access page without setting a session.
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H 'accept: text/html' https://<host>/
+curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' -H 'accept: text/html' https://<host>/account
+```
+
+## The access list
+
+`auth_allow` accepts entries separated by commas or whitespace:
+
+| Entry | Admits |
+| --- | --- |
+| `@example.com` | Anyone whose provider-verified email is at that domain. Google accounts must also carry Google's Workspace `hd` claim for the domain, so consumer Google accounts are excluded (list those by address or `google:<sub>`). |
+| `alice@example.com` | That specific verified email address. |
+| `github:583231` | That GitHub account, by numeric ID from `https://api.github.com/users/<login>`. |
+| `google:104938271650293847561` | That Google account, by its `sub` claim. |
+| `*` | Anyone with a GitHub or Google account. |
+
+Set `auth_allow` to `*` for customer-facing applications such as a shop where
+anyone can register on sign-in. For internal tools, list your organization's
+domain or explicit accounts, and optionally configure `auth_admins` to manage
+the list at `/auth/access`.
+
+Any entry that fails to parse is dropped and logged, never widened into a
+broader rule. Email entries match only provider-verified addresses (Google's
+`email_verified` claim or GitHub's primary verified address). Identities never
+match on login names because usernames can be released and claimed by someone
+else.
+
+The access list has two halves. The static half in `auth_allow` changes through
+`set_secret` and a redeploy. Accounts listed in `auth_admins` can manage a live
+stored half at `/auth/access` while the application runs. That stored half lives
+under `auth/access` in your store, holds up to 500 entries, cannot include `*`
+(opening an app to the public is a deployment-time secret change), and always
+admits administrators. Scripts can manage the same stored half with
+`POST /auth/access` using `{"add": "<entry>"}` or `{"remove": "<entry>"}` (with
+an admin session and CSRF token), and `GET /auth/access.json` returns both
+halves.
+
+Administrators can also generate invite links from `/auth/access` or via
+`POST /auth/access` with `{"invite": {"label": "...", "uses": 10, "days": 7}}`,
+and revoke them with `{"revoke_invite": "<id>"}`. An invite admits 1 to 1000
+users and lasts 1 to 90 whole days (7 when `days` is omitted). The reply
+returns `<origin>/auth/sign-in?invite=<code>` once; the store retains only the
+code's SHA-256 hash. An unlisted user who signs in through that link is added to
+the stored half and lands on `AuthOptions::invite_return_to` (`/` by default).
+`GET /auth/access.json` lists active invites too.
+
+The package evaluates the access list on every request and re-reads the stored
+half at most every five seconds. Removing someone therefore takes effect on
+their next request after that window rather than waiting for session expiry,
+and adding someone takes effect the next time they sign in.
+
+## A shop's customers
+
+With `auth_allow` set to `*`, anyone with a GitHub or Google account becomes a
+customer on sign-in while your catalogue remains public. Everything you store
+about a customer lives in your application's store like any other product state.
+
+### Customer records
+
+Key every customer record by `session.subject().key()` (for example
+`customers/github:583231`), never by an email address or login name. On a
+subject's first visit to the account page, initialize their record from the
+session: use `session.record.name` or `session.record.login` for a display name
+and `session.record.email` for their provider-verified email. Treat email as an
+optional attribute rather than a key; a customer whose provider returns no
+verified address can enter a contact address on the account page.
+
+### Saved addresses
+
+Store shipping addresses under the customer's key prefix, such as
+`customers/github:583231/addresses`. Adding or removing an address mutates
+state and therefore passes `Auth::gate`'s CSRF check. Server-rendered pages
+need no JavaScript for this: render `session.csrf_field()` inside each
+`<form method="post">` so standard browser form submissions carry the token
+([Forms and the CSRF check](#forms-and-the-csrf-check)).
+
+### Checkout and payment
+
+Keep checkout behind `Auth::gate` so every order belongs to a verified customer.
+Handle card payments with the `payments` package (`ferrite add payments`) and
+Stripe's hosted Checkout: compute order totals from your own prices, build the
+session request with `payments::stripe::create_checkout_session` (line items,
+prefilled customer email, and an idempotency key derived from the order ID),
+send it over an egress handle naming `https://api.stripe.com/`, and redirect the
+customer to Stripe's hosted page. Card details stay on Stripe's page and never
+touch your application; store only Stripe's identifiers (`cs_…`, `pi_…`) on the
+order.
+
+Receive Stripe payment confirmations on a webhook route that forwards
+`stripe-signature` and runs before `Auth::gate`. Authenticate the raw request
+body with `payments::webhook::verified_event` and record each processed event
+in `payments::ledger::EventLog` so redeliveries are no-ops.
+
+The `payments` package creates Stripe Checkout sessions in payment mode only.
+It does not create Stripe customer objects or save cards for reuse, so
+returning customers enter payment details on Stripe's page on each order. Read
+the `payments` package guide (`read_package {"name": "payments"}`) for its
+verified test coverage.
+
+## Forms and the CSRF check
+
+Every request other than `GET` and `HEAD` must pass two checks before
+`Auth::gate` returns a session. The request must originate from your configured
+origin, and it must present the session's CSRF token in one of two places:
+
+- The `x-csrf-token` header, sent by scripts after reading `csrf_token` from
+  `GET /auth/session` (the token travels in a response body because a reply can
+  set only one cookie, and that cookie is `HttpOnly`).
+- A hidden `_csrf` field inside an `application/x-www-form-urlencoded` body
+  submitted by a plain `<form method="post">`.
+
+Embed `session.csrf_field()` in every server-rendered form shown to a signed-in
+user:
+
+```rust
+let form = format!(
+    "<form method=\"post\" action=\"/account/addresses\">{}\
+     <input name=\"line1\" required><button>Save</button></form>",
+    session.csrf_field(), // <input type="hidden" name="_csrf" value="…">
+);
+```
+
+`session.csrf_token()` returns the raw token string. When both the header and
+form field are present, `x-csrf-token` wins. The package parses the body only
+when the forwarded `content-type` header names a urlencoded form (so your route
+must forward `content-type`), ignores JSON or `text/plain` bodies, and refuses
+requests where `_csrf` appears more than once. `POST /auth/sign-out` and
+`POST /auth/sign-out-everywhere` accept the same `_csrf` form field, so a
+sign-out button works as a plain HTML form.
+
+## Test a signed-in page
+
+Automated tests receive no deployed secrets and cannot complete live redirects
+through GitHub or Google, so the package ships `auth::testing`. The module is
+compiled in test and debug builds only: deploys build with `--release`, where
+`auth::testing` does not exist, so production code referencing it fails to
+compile. Run these tests with `cargo test` or `ferrite test` without
+`--release`.
+
+```rust
+use ferrite_app_test::TestHarness;
+use corner_shop::auth::testing::{self, TestSecrets, TestUser};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_account_page_belongs_to_the_signed_in_customer() {
+    let env = TestHarness::new()
+        .with_queue("requests")
+        .with_queue("replies")
+        .with_store("state")
+        .build()
+        .await;
+    // The application reads these with ctx.secret, as after a deploy.
+    let secrets = TestSecrets::new(); // auth_allow "*", a fake GitHub client
+    let ctx = secrets.context(env.payload(), env.clock());
+    env.run_app(move |_| corner_shop::run(ctx));
+
+    // Anonymous: sent to sign in.
+    let mut anonymous = ferrite_app_test::ingress::get("/account");
+    anonymous.headers.push(("accept".into(), "text/html".into()));
+    assert_eq!(env.handle(anonymous).await.unwrap().status, 303);
+
+    // A session written into the same store, as the provider callback would.
+    let mut auth = corner_shop::auth::Auth::new(secrets.config().unwrap(), env.store("state"));
+    let customer = TestUser::github("583231").email("ada@example.com");
+    let me = testing::sign_in(&mut auth, &customer, env.now_ms()).await.unwrap();
+
+    assert_eq!(env.handle(me.get("/account")).await.unwrap().status, 200);
+    let saved = env
+        .handle(me.post_form("/account/addresses", &[("line1", "1 Main St")]))
+        .await
+        .unwrap();
+    assert_eq!(saved.status, 303);
+}
+```
+
+`me.get(target)` constructs a browser navigation with the session cookie;
+`me.post_form(target, fields)` adds `_csrf` and same-origin headers;
+`me.send_json(method, target, &body)` sends the token in `x-csrf-token`. Call
+`TestSecrets::new().allow("@example.com")` to test access-list rules, and call
+`.without("auth_public_origin")` to test unconfigured error responses. For unit
+tests that render a page directly from `&Session`,
+`testing::session(&config, &user, now)` creates a session without a store.
+Sessions minted with `testing::sign_in` are ordinary store records checked by
+the full gate, access list and CSRF rules included.
+
+## What the package guarantees
+
+Sign-in uses a single cookie,
+`__Host-ferrite_auth; Path=/; Secure; HttpOnly; SameSite=Lax`, because the
+gateway relays only the first `set-cookie` header of each reply. Before
+callback completion its value holds a transaction ID; the callback redirect
+replaces it with the session ID in that single header.
+
+Every subject is formatted as `github:<numeric id>` or `google:<sub>`, never as
+a login name or email address. When a provider vouches for an email address,
+the session carries it as an attribute and `GET /auth/session` returns it as
+`email`, along with `subject`, `provider`, `login`, `name`, `auth_time_ms`,
+`expires_at_ms`, `csrf_token`, `access_admin`, and `dev_sign_in`. An anonymous
+caller to `GET /auth/session` receives `200` with `{"authenticated": false}`.
+Session records are stored under a hash of the session ID so reading the store
+yields no usable cookie. Every sign-in mints a new session ID and revokes the
+browser's prior session. Sessions expire strictly after twelve hours.
+`POST /auth/sign-out` deletes the session record; `POST /auth/sign-out-everywhere`
+bumps the subject's generation counter and invalidates every outstanding
+session without enumerating them.
+
+`GET /auth/start/google?prompt=select_account` asks Google to display its
+account chooser instead of reusing the browser's active Google account, so a
+user rejected by the access list can sign in with a different Google account.
+Any other `prompt` value is ignored, and GitHub sign-in ignores `prompt`.
+
+Every state-changing request must come from `auth_public_origin` (checked via
+`origin`, or `sec-fetch-site: same-origin` when the browser omits `origin`) and
+present the session's CSRF token in `x-csrf-token` or `_csrf`
+([Forms and the CSRF check](#forms-and-the-csrf-check)). Failures return `403`
+with a body naming the failed condition. `return_to` accepts only canonical
+in-application paths; `//host`, backslashes, schemes, fragments, dot segments,
+encoded separators, and the package's own routes all collapse to `/`.
+
+Because the gateway supplies no verified client address, there is no per-client
+rate limit on starting sign-in; `AuthOptions::max_starts_per_minute` enforces
+one global bound across the application.
+
+`AuthOptions::default()` sets `prefix` to `/auth`, `store_prefix` to `auth/`,
+`session_ttl_ms` to twelve hours, `transaction_ttl_ms` to ten minutes,
+`max_starts_per_minute` to `300`, `invite_return_to` to `/`, and leaves
+`callback_paths` empty (entries there replace a provider's default callback
+path with one already registered).
+
+## What the package does not do
+
+The `auth` package signs users in with GitHub or Google and no other method. It
+provides no password, email-link, or passkey authentication; an Alloy
+application that issues and stores its own passwords uses the separate
+`alloy-auth` package instead ([Packages](/developers/packages/)). It speaks no
+SAML, connects to no custom enterprise identity provider, performs no SCIM
+provisioning, and enforces no second factor beyond whatever the user's GitHub
+or Google account requires. The closest match to corporate sign-in is a Google
+Workspace domain entry in [the access list](#the-access-list).
+
+The package keeps no roles and makes no per-resource authorization decisions.
+That belongs in your application's
+[Authorization](/developers/authorization/), and Ferrite does not stop one
+signed-in user from reading another user's store keys if your handler permits
+it. Because sign-in targets browsers and issues no API token to external
+programs, a customer's assistant calling your application over a remote MCP
+connection receives no credential from this package
+([Assistants acting for a person](/developers/authorization/#assistants-acting-for-a-person)).
+
+Sessions expire unconditionally twelve hours after sign-in regardless of
+activity, and sign-in start throttling applies globally to the application
+rather than per client. Account for these boundaries before building on `auth`.
+
+## Local development
+
+`ferrite dev` serves plain HTTP on `http://localhost:8787`, where browsers
+refuse both `Secure` and `__Host-` cookies. Put local development secrets in
+`ferrite.local.toml`, which is git-ignored and never deployed:
+
+```toml
+[secrets]
+auth_public_origin = "http://localhost:8787"
+auth_dev_mode = "insecure-local-http"
+auth_session_key = "<the output of openssl rand -base64 48>"
+auth_allow = "*"
+auth_github_client_id = "<a separate development OAuth app>"
+auth_github_client_secret = "<its secret>"
+```
+
+Register `http://localhost:8787/auth/callback/github` on a dedicated
+development OAuth app, never on your production client. Only when
+`auth_dev_mode` equals `insecure-local-http` and `auth_public_origin` is an
+`http://` origin on loopback, `localhost`, `*.localhost`, or `*.test` does the
+package use an unprefixed, non-`Secure` cleartext development cookie. Every
+other combination is a configuration error, so a stray flag cannot weaken an
+`https://` deployment.
+
+The only place `auth_dev_mode` is set with `ferrite secrets set` is a local
+plain-HTTP fleet: `ferrite host` prints an `http://` origin under the fleet's
+test domain, and `ferrite add auth` and `ferrite deploy` list `auth_dev_mode`
+alongside the other secrets. Never set `auth_dev_mode` on an application served
+by a public Ferrite installation.
+
+`ferrite dev` binds port `8787` only when free and otherwise picks the next
+available port, and warns if `ferrite.local.toml` still points to `8787`. Keep
+`auth_public_origin` and the registered callback aligned with the active port,
+or pin the port with `port = <n>` under `[dev]` or `--port`.
+
+A local fleet's hosts have no OAuth client registered for them. For that setup,
+when `auth_dev_mode` is active as above and `auth_dev_sign_in` equals
+`enabled-insecure-local-development-only`, the package adds `/auth/start/dev`,
+an email prompt at `/auth/dev/identity`, and `/auth/callback/dev`. That
+callback runs the same state, access-list, and session checks as a real
+provider without contacting GitHub or Google, creates the subject
+`dev:<hash of the address>`, and sets `"dev_sign_in": true` in
+`GET /auth/session`. On any `https://` origin, or without `auth_dev_mode`,
+setting `auth_dev_sign_in` is a configuration error. Because the CLI still
+lists a provider client ID among missing secrets, deploy to a local fleet with
+`--allow-missing-secrets`.
+
+## What is proven
+
+The `auth` package compiles against upstream `ferrite-app` with no extra
+dependencies and passes the code gate in deploy and test modes. Its offline
+test suite exercises provider ceremonies against test doubles, access-list
+refusal at sign-in, live removal on subsequent requests, `/auth/access` admin
+routes, and form-field `_csrf` checks, and `auth::testing` supports full
+end-to-end tests over `ferrite-app-test`'s in-process planes. Ferrite's own sign-in broker
+vendors the package in production against GitHub and Google with `auth_allow`.
+
+Because automated package tests run against provider doubles and in-process
+planes, make three checks part of your first live deployment: complete a real
+GitHub or Google sign-in with an admitted account, confirm that an unlisted
+account is refused with no session left behind, and submit a browser HTML form
+carrying `_csrf`.
+
+## Password-change discovery
+
+`ferrite add agent-ready` provides the `/.well-known/change-password` discovery
+route. Because `auth` has no password method, leave
+`PageSource::change_password_url()` at its default (`None`), under which
+discovery returns `404`. Override it to return a path only when your
+application serves a real password-change page.
+
+## How Ferrite's own applications share a sign-in (not for yours)
+
+The `ferrite-login` broker and the `ferrite-sso` package coordinate single
+sign-in across Ferrite's own first-party properties. A registered first-party app redirects
+the browser to `https://login.ferrite.cloud/sso/start` with its `client_id` and
+a relative `return_to` path. The broker signs the user in with the `auth`
+package on its own host under the broker's access list, then returns a
+short-lived, audience-bound, single-use assertion. The application's
+`/_sso/callback` route verifies the assertion's signature, audience, and expiry,
+consumes its nonce so it cannot be replayed, and issues a host-only session
+bound to its `client_id` so it never verifies on another application. That
+session lives one hour; any navigation after the first 30 minutes renews
+through the broker (which rechecks its access list), and `/_sso/logout` ends
+it.
+
+Because every participating application shares the HMAC secret that signs
+assertions, any participant could sign one. That scheme is limited to mutually
+trusted, Ferrite-owned applications. Customer applications should use the
+`auth` package directly as described on this page.
+
+Next: integrate `auth` with an Alloy app in
+[Sign-in for Alloy applications](/developers/authentication-alloy/), add
+resource rules in [Authorization](/developers/authorization/), or review secret
+and egress boundaries in [Secrets & Egress](/developers/secrets-egress/).

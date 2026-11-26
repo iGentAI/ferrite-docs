@@ -1,0 +1,31 @@
+---
+title: "Search"
+description: "How to handle exact-term lookup and relevance-ranked search on Ferrite today."
+section: "Data"
+order: 6
+---
+
+Ferrite has no search service that an application can bind: `ferrite.json` has
+no search primitive or binding, and the platform provides no built-in relevance
+ranking. The keyword search engine, `ferrite-search`, runs only as an operator
+process, so the `search/` folders in the [sample packs](/developers/samples/)
+serve as reference material that deployed applications do not read.
+
+## What to use instead
+
+- Use the [Key-value Store](/developers/store/) for records and bounded prefix
+  scans. For exact-term lookup, maintain your own index under a key prefix such
+  as `tenant/{tenant_id}/term/{term}/{doc_id}`. Write the record first and its
+  index entries afterward; when reading through the index, verify that the
+  record still contains the term, because a failure between writes can leave
+  stale index entries behind.
+- Use [Transactions](/developers/transactions/) when cross-record invariants or
+  small index updates must commit atomically (up to 64 keys per envelope).
+- Use [Streams](/developers/streams/) for ordered event histories that feed read
+  models or external indexes.
+- For relevance-ranked full-text search, call a hosted search provider through a
+  declared egress destination and store its API key as an application secret
+  read with `ctx.secret`. Buffered egress calls allow 10 seconds per exchange
+  and a 1 MiB response body; see
+  [Secrets & Egress](/developers/secrets-egress/) and
+  [Limits](/developers/limits/).

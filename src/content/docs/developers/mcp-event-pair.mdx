@@ -1,0 +1,177 @@
+---
+title: "Consume MCP Events from an outside source"
+description: "Deploy a Ferrite emitter and receiver, stream through an independent publisher, and verify replay and signed callbacks."
+section: "Assistants & MCP"
+order: 6
+---
+
+This walkthrough connects two Ferrite applications through an MCP Events publisher running outside Ferrite. The first Ferrite app saves messages and posts them outbound to the publisher. The second Ferrite app subscribes to that publisher's stream and webhooks, persists each occurrence alongside its cursor and a visible effect, and recovers from disconnects without duplicating effects.
+
+Use this pattern when your event source runs outside Ferrite. Outbound egress from a Ferrite app refuses destinations on Ferrite's own domain, and the manifest's `depends` key for calling another application cannot be deployed yet (see [App Manifest](/developers/app-manifest/)). Placing an external Cloudflare Worker in the middle also gives the receiver both push streams and signed webhook callbacks, while the hosted Ferrite emitter serves its own history over polling.
+
+You need a Ferrite account, the current [CLI](/developers/cli/), Node.js 22 or newer, and a Cloudflare account that can deploy Workers and Durable Objects. The Worker and Durable Object run in your own Cloudflare account under your normal quotas.
+
+## Prepare the two applications
+
+Start in a fresh directory. The example archive contains the emitter, the receiver, the Cloudflare Worker publisher, and a per-file hash manifest. These commands verify the download, scaffold both apps with `ferrite new`, add the `agent-ready` and `http-route-budget` packages to each, copy in the manifests and Rust source, add the `mcp` package (1.6.0 or newer) to the receiver, and capture both app origins with `ferrite host`. Because the `.sha256` file comes from the same host as the tarball, checking it catches a corrupted download; it cannot guard against a compromised origin:
+
+```bash
+curl -fsS https://downloads.ferrite.cloud/examples/mcp-events/1.6.0-r3/event-pair.tar.gz -o event-pair.tar.gz
+curl -fsS https://downloads.ferrite.cloud/examples/mcp-events/1.6.0-r3/event-pair.sha256 -o event-pair.sha256
+shasum -a 256 -c event-pair.sha256
+tar -xzf event-pair.tar.gz
+ferrite new hello mcp-event-emitter
+ferrite new hello mcp-event-receiver
+for kind in emitter receiver; do
+  app="mcp-event-$kind"
+  cp "event-pair/$kind/Cargo.toml" "$app/Cargo.toml"
+  ferrite add agent-ready --dir "$app"
+  ferrite add http-route-budget --dir "$app"
+  cp -R "event-pair/$kind/src/." "$app/src/"
+  cp "event-pair/$kind/ferrite.json" "$app/ferrite.json"
+done
+ferrite add mcp --dir mcp-event-receiver
+export RECEIVER_ORIGIN=$(ferrite host --dir mcp-event-receiver --json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).origin')
+export EMITTER_ORIGIN=$(ferrite host --dir mcp-event-emitter --json | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).origin')
+```
+
+## Deploy the independent publisher
+
+Copy the publisher source into a working directory:
+
+```bash
+cp -R event-pair/publisher event-publisher
+```
+
+In `event-publisher/wrangler.jsonc`, pick a unique Worker name and set `vars.CALLBACK_URL` to `$RECEIVER_ORIGIN/webhook/showcase-webhook`. Keep the existing Durable Object binding and migration intact, then deploy through Cloudflare's [Wrangler deployment guide](https://developers.cloudflare.com/workers/wrangler/commands/#deploy):
+
+```bash
+cd event-publisher
+npx wrangler login
+npx wrangler deploy
+cd ..
+```
+
+Generate a private publishing key, store it as the Worker's `PUBLISH_KEY` secret, and record the deployed HTTPS origin in `PUBLISHER_ORIGIN` (you will pass the same `PUBLISH_KEY` to the emitter next):
+
+```bash
+export PUBLISH_KEY=$(openssl rand -hex 32)
+cd event-publisher
+printf '%s' "$PUBLISH_KEY" | npx wrangler secret put PUBLISH_KEY
+cd ..
+export PUBLISHER_ORIGIN=https://YOUR_WORKER.workers.dev
+export SOURCE_ENDPOINT="$PUBLISHER_ORIGIN/mcp"
+```
+
+## Configure outbound authority and secrets
+
+> **Caution.** The extracted archive points at the example's default demonstration Worker. If you deploy the emitter without replacing those references, the platform permits outbound requests to that Worker and sends it your `PUBLISH_KEY` and `SOURCE_TOKEN`. Apply all three edits below and verify empty `grep` output before setting secrets or deploying.
+
+Make these three edits in the copied app directories (keep `event-pair/` unchanged as a reference):
+
+1. In `mcp-event-emitter/src/publisher.rs`, change the `URL` constant to `$PUBLISHER_ORIGIN/api/events`.
+2. In `mcp-event-emitter/ferrite.json`, set `applications[0].egress[0].destinations` to that exact URL.
+3. In `mcp-event-receiver/ferrite.json`, set `applications[0].egress[0].destinations` to `$SOURCE_ENDPOINT` (otherwise the receiver refuses your Worker because its egress grant does not list it).
+
+Confirm no references to the default Worker remain. This command must print nothing:
+
+```bash
+grep -Rn ferrite-events-demo mcp-event-emitter/src mcp-event-emitter/ferrite.json mcp-event-receiver/ferrite.json
+```
+
+Ferrite enforces those egress declarations against every outbound request at runtime.
+
+Next, generate a source capability token to scope your event history along with separate receiver admin and webhook secrets, write them through `ferrite secrets set`, and check, test, and deploy both apps:
+
+```bash
+export SOURCE_TOKEN=$(openssl rand -hex 32)
+export RECEIVER_ADMIN_TOKEN=$(openssl rand -hex 32)
+export WEBHOOK_SECRET=$(openssl rand -hex 32)
+printf '%s' "$SOURCE_TOKEN" | ferrite secrets set publish_owner_token --dir mcp-event-emitter
+printf '%s' "$PUBLISH_KEY" | ferrite secrets set publish_key --dir mcp-event-emitter
+printf '%s' "$SOURCE_ENDPOINT" | ferrite secrets set source_endpoint --dir mcp-event-receiver
+printf '%s' "$SOURCE_TOKEN" | ferrite secrets set source_token --dir mcp-event-receiver
+printf '%s' "$RECEIVER_ADMIN_TOKEN" | ferrite secrets set receiver_admin_token --dir mcp-event-receiver
+printf '%s' "$WEBHOOK_SECRET" | ferrite secrets set webhook_secret --dir mcp-event-receiver
+printf '%s' "$RECEIVER_ORIGIN" | ferrite secrets set public_origin --dir mcp-event-receiver
+for app in mcp-event-emitter mcp-event-receiver; do
+  ferrite check --dir "$app"
+  ferrite test --dir "$app"
+  ferrite deploy --dir "$app"
+done
+```
+
+## Register the history, then start observation
+
+Publish a bootstrap message first so the external publisher registers your `SOURCE_TOKEN` history before the receiver opens its stream. New subscriptions start observing after this initial message:
+
+```bash
+curl -fsS "$EMITTER_ORIGIN/api/events" \
+  -H "Authorization: Bearer $SOURCE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"bootstrap","value":"Start this history"}'
+curl -fsS "$EMITTER_ORIGIN/api/publish" \
+  -H "Authorization: Bearer $SOURCE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"bootstrap"}'
+```
+
+Create a push subscription on the receiver with an ID of your choice, then poll its status until `streamOpen` turns `true`. Resolve any `lastError` before publishing test messages:
+
+```bash
+curl -fsS "$RECEIVER_ORIGIN/api/subscriptions" \
+  -H "Authorization: Bearer $RECEIVER_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"stream-example","mode":"push","eventName":"message.created","arguments":{}}'
+curl -fsS "$RECEIVER_ORIGIN/api/subscriptions/stream-example" \
+  -H "Authorization: Bearer $RECEIVER_ADMIN_TOKEN"
+```
+
+Save and publish a message from the emitter, then inspect the receiver's subscription state:
+
+```bash
+curl -fsS "$EMITTER_ORIGIN/api/events" \
+  -H "Authorization: Bearer $SOURCE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"first-message","value":"Hello from the emitter"}'
+curl -fsS "$EMITTER_ORIGIN/api/publish" \
+  -H "Authorization: Bearer $SOURCE_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"first-message"}'
+curl -fsS "$RECEIVER_ORIGIN/api/subscriptions/stream-example" \
+  -H "Authorization: Bearer $RECEIVER_ADMIN_TOKEN"
+```
+
+Verify that `effects` holds the matching occurrence with `effectCount` equal to `1`, and record `receivedAtMs`, the source's `emittedAt`, and `streamOpen: true` (seeing the effect while the stream remains open confirms live incremental delivery). Repeat the `/api/publish` call for `first-message` and confirm `effectCount` stays at `1`. Posting a different `value` for the same message ID returns HTTP `409`.
+
+You can run the same flow in a browser by opening both app URLs, entering `$SOURCE_TOKEN` in the emitter and `$RECEIVER_ADMIN_TOKEN` in the receiver, and using **Emit message** and **Publish saved message** on the emitter alongside **Start or reconnect**, **Refresh**, and **Stop** on the receiver. Reloading the receiver preserves stored effects; tokens live only in the page inputs and must be re-entered after a reload.
+
+## Verify reconnect and webhook delivery
+
+Stop `stream-example`, save and publish a second distinct message from the emitter, and re-submit the same subscription request to reconnect. The receiver should resume from its committed cursor, pick up the second message, and leave the first effect unrepeated:
+
+```bash
+curl -fsS -X POST "$RECEIVER_ORIGIN/api/subscriptions/stream-example/stop" \
+  -H "Authorization: Bearer $RECEIVER_ADMIN_TOKEN"
+```
+
+To test signed callbacks, keep the push subscription stopped (so you stay within the example's concurrency budget) and create a new subscription with `"mode":"webhook"` and a fresh ID. The receiver registers its fixed callback `/webhook/showcase-webhook`, answers the signed verification challenge, and refreshes the subscription automatically; only one automatic webhook subscription can own that callback path at a time. Wait until `challenges` increments and `subscriptionResult` succeeds, then publish a new message and confirm one stored effect appears. Treat the source's `refreshBefore` timestamp as authoritative; the example's `expiresAtMs` field is an estimate from the requested lifetime.
+
+When you finish testing, stop each subscription and send `DELETE` to `/api/subscriptions/ID` to free its slot. Pick a fresh subscription ID on later runs, because deletion leaves a one-day tombstone.
+
+## Decide whether it worked
+
+| Check | Required observation |
+| --- | --- |
+| Live stream | The receiver stores the event before the connection closes. |
+| Duplicate | Repeating a message or delivery preserves one business effect. |
+| Reconnect | A new connection resumes from the last committed cursor and recovers the next event. |
+| Consent | The signed challenge is accepted before callback delivery. |
+| Signature | An altered body or invalid signature is rejected without changing stored effects. |
+| Stop | Further events produce no effect after the subscription has stopped. |
+| Expiry | Refresh preserves delivery; an expired subscription stops delivering. |
+| Measurement | Capture event-to-effect latency, reconnect time, retries, refusals, duplicate count and memory during active and idle periods. |
+
+In this example, each source capability retains at most 128 messages for one hour, and the receiver holds at most eight subscription entries with 128 effects per entry. Both stop at those limits instead of evicting deduplication history. Size retention windows, leases, and refresh schedules explicitly for production workloads.
+
+See [MCP Events](/developers/mcp-events/) for the protocol lifecycle, Rust `EventsStream` client, and webhook verification API.

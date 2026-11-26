@@ -1,0 +1,50 @@
+---
+title: "Alloy Next.js Adapter"
+shortTitle: "Next.js Adapter"
+description: "What the Alloy Next.js adapter does, why it is not distributed, and what an Alloy front end can use instead."
+section: "Alloy"
+order: 7
+---
+
+`@alloy/next` is a compatibility layer that lets a Next.js App Router React component tree compile unchanged against an Alloy Rust backend by remapping Next.js imports through Vite aliases. It is not distributed with the Ferrite CLI or published to npm; this page explains what you use in a standard Alloy frontend today and documents what `@alloy/next` maps for reference.
+
+## Availability
+
+`@alloy/next` is not published to npm, cannot be installed with `ferrite add`, and is not included in any `ferrite new` template. It exists only as internal source used when porting open-source Next.js apps to Alloy.
+
+For your own Alloy frontend, use the code that `ferrite dev` generates into `web/src/generated/`: TypeScript contract types, loader and action fetch clients, TanStack Query hooks with tag-epoch invalidation, and the typed route table. The [Quickstart](/developers/alloy-quickstart/#add-a-typed-contract-and-a-react-front-end) shows how to seed initial state from `__alloy_data` and wire those modules into a standard Vite and React project. Choose any client-side router you prefer for navigation and prefetching.
+
+Existing Next.js applications do not run on Ferrite unmodified. Any server-side JavaScript (server rendering, server actions, route handlers, middleware, and image optimization) must be rewritten as Rust loaders and actions, and `@alloy/next` is unavailable externally. Keep existing Next.js apps on a host that runs Next.js; choose Alloy for applications whose server side you write in Rust from the start.
+
+## What it maps
+
+This table summarizes the module mappings inside `@alloy/next` so you can see what a Next.js port relies on. None of these modules are available outside Ferrite's own ports.
+
+| Next.js import | What the adapter maps it onto |
+|---|---|
+| `next/link` | Client router navigation: same-origin clicks fetch loader payloads, and `prefetch` warms them on viewport entry, hover, or focus |
+| `next/navigation` | `useRouter`, `usePathname`, `useSearchParams`, `useParams`, `useSelectedLayoutSegments`, `redirect`, `permanentRedirect`, `notFound`, `forbidden`, `unauthorized`, and `useLinkStatus` over the same client router |
+| `next/cache` | `updateTag`, `revalidateTag`, `revalidatePath`, `cacheTag`, and `cacheLife`; each invalidates client TanStack Query entries from the tag epochs an action reply advanced |
+| `next/form` | `<Form>` with Next.js semantics: a string `action` triggers a `GET` navigation, and a function `action` passes through to React 19's `<form action>` |
+| `next/script` | `<Script>` supporting `afterInteractive` and `lazyOnload`; `beforeInteractive` and `worker` degrade with a warning |
+| `next/dynamic` | `React.lazy` inside `<Suspense>`, honoring `loading`; `ssr: false` is accepted as a no-op |
+| `next/image` | Plain `<img>` that reserves its box and honors `priority`, `fill`, `sizes`, and blur placeholders without an image optimizer |
+| `next/headers` | `cookies()` over `document.cookie`, and `draftMode()` checking `__Host-alloy_draft` there; because Alloy marks `__Host-alloy_draft` as `HttpOnly`, `document.cookie` never exposes it and `draftMode()` reports it absent, so pass draft state from the server in the page's payload instead |
+| `next/error`, `next/og`, `next/server`, `server-only` | Type stubs so copied files type-check while the corresponding server logic runs in Rust |
+| `geist/font/*`, `next-themes` | Matching class names and theme toggling backed by local files |
+| `@vercel/analytics/next`, `@vercel/speed-insights/next` | Web Vitals reporting (LCP, CLS, INP, FCP, and TTFB in standard `web-vitals` metric shape) to the app's own `/__alloy/vitals` endpoint; nothing is sent to Vercel |
+
+## How a port uses it
+
+A port rewrites only server-side data and mutation modules: `*-queries.ts` and `*-actions.ts` files marked `server-only` or `'use server'`. Their database code becomes Rust loaders and actions with matching names, arguments, return shapes, and cache tags, and the rewritten TypeScript module re-exports the generated client at the original import path so component imports stay unchanged. Every other upstream file remains byte-identical to its pinned commit.
+
+Async server components render in the browser through a `serverComponent()` wrapper that suspends on a promise memoized by props, because React 19 resolves async function components only on the server.
+
+## Not claimed
+
+- React runs strictly in the browser and never on the server at request time, so there is no streaming SSR and no React Server Components wire format.
+- Request-time image optimization is absent; `quality`, `loader`, and `unoptimized` props are accepted for compatibility and ignored.
+- Parallel and intercepted routes are unsupported; calling `useSelectedLayoutSegments` with a `parallelRouteKey` throws an explicit error.
+- HTML documents return in one buffer instead of streaming; deferred data arrives in loader segments fetched after first paint (see [Documents & Assets](/developers/alloy-documents/)).
+
+Next: [Testing & Gates](/developers/alloy-testing/).

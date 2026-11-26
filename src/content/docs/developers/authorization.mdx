@@ -1,0 +1,68 @@
+---
+title: "Authorization"
+description: "Separate what your application can reach (enforced by Ferrite from ferrite.json) from what each signed-in user or assistant may do inside it (enforced in your code)."
+section: "Security"
+order: 2
+---
+
+Every request crosses two distinct authorization boundaries. First, Ferrite enforces what your application is permitted to reach: which stores, queues, streams, object storage, and external URLs it can touch, read directly from `ferrite.json`. Second, your code enforces what each signed-in user or assistant can do inside the application: viewing their own orders, editing team settings, or refunding a payment. Ferrite plays no role in per-user rules; you write them against the verified subject from the [`auth` package](/developers/authentication/). Keep the two layers separate, because manifest bindings never isolate one user from another.
+
+## What an application can reach
+
+Each entry under `bindings` in `ferrite.json` connects a handle to one service and primitive kind, and each entry under `egress` maps a handle to explicit outbound URL prefixes. At runtime, Ferrite injects handles only for the services, routes, and destinations declared in that manifest. Code cannot reach an undeclared resource by guessing its name, and every outbound HTTP call routes through the platform gateway to declared destinations only.
+
+```json filename="ferrite.json"
+{
+  "services": [
+    { "name": "shop-orders", "primitive": "store" },
+    { "name": "shop-jobs", "primitive": "queue" }
+  ],
+  "applications": [{
+    "name": "shop",
+    "artifact_key": "apps/shop@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "orders", "kind": "store", "service": "shop-orders" },
+      { "handle": "jobs", "kind": "queue", "service": "shop-jobs" }
+    ],
+    "egress": [
+      { "handle": "payments", "destinations": ["https://api.stripe.com/"] }
+    ]
+  }]
+}
+```
+
+A binding accepts four keys: `handle`, `kind`, `service`, and an optional `key_prefix`. The manifest parser rejects any other key, so bindings carry no per-operation permission flags. Every handler inside an application receives every declared binding; adding `key_prefix` restricts that binding to keys beneath the prefix. When a background worker needs less authority than your public HTTP handler, deploy the worker as a separate application with its own manifest listing only the bindings it requires.
+
+Multiple layers enforce these declarations. Pre-build source admission rejects code that references host files, environment variables, processes, or raw sockets, and the platform compiles the checked source itself. At runtime, every service validates a signed capability token issued only for the application's own bindings, and the gateway mediates every outbound call. Static checks filter violations before compilation; OS containment enforces the hard runtime boundary. Read [What bounds your app](/developers/why-it-is-safe/) for each containment layer, what it does not cover, and what applications on the same host share.
+
+## Product authorization
+
+Ferrite does not prevent one signed-in user from reading or modifying another user's records. Because every handler shares the same store bindings, a store holding one customer's orders is equally accessible during another customer's request. Your handler separates them.
+
+Resolve the signed-in subject with `Auth::gate`, then verify that subject's permission for the specific action before reading or writing data:
+
+- Namespace per-user records under keys built from `session.subject().key()`, such as `customers/github:583231/orders/...`. Always construct those keys from the verified session, never from a path segment, query parameter, or form field in the request.
+- Return `404` instead of `403` when a record exists under another user's ownership, so responses never confirm whether an arbitrary ID exists.
+- Store explicit membership records for multi-user rules, such as a support agent reading tickets for assigned tenants or a staff member administering their own calendar, and check that record on every access.
+- Re-verify authorization on every request against live records read from your store. Never trust roles copied into browser state, hidden form fields, or an assistant's context.
+
+Test tenant isolation with two distinct users. Call `auth::testing::sign_in` for two `TestUser` accounts against the same store, create a record as the first user, and assert that the second user receives `404` on every route that reads or modifies it. See [Test a signed-in page](/developers/authentication/#test-a-signed-in-page) for the test harness.
+
+The `auth` package has no built-in step-up authentication or second factor. When a sensitive action requires a recent sign-in, compare the session's `auth_time_ms` against the current time and redirect the user through `/auth/sign-in` once it exceeds your threshold. Because the package does not force the identity provider to re-prompt for a password, a newer `auth_time_ms` proves a fresh pass through the provider rather than fresh password entry.
+
+## Assistants acting for a person
+
+A customer's assistant reaches your application over two different paths with different trust boundaries.
+
+Through [WebMCP](/developers/webmcp-openapi/), the assistant invokes tools inside the user's browser tab on your application's own origin. Those calls carry the user's `HttpOnly` session cookie, which stays hidden from both page scripts and the assistant. The assistant therefore acts with whatever authority page scripts hold for that user. Any state-changing WebMCP tool must send the CSRF token from `GET /auth/session` in `x-csrf-token`, and `Auth::gate` enforces it like any other mutation. Expose only operations you are comfortable letting an assistant execute under the user's session without extra confirmation.
+
+Over a remote MCP connection, the assistant calls your application from outside the browser and holds no session cookie. The `auth` package authenticates browser users only and issues no tokens to external programs; the `agent-ready` MCP face performs no caller authentication on its own. Your handler owns remote caller authentication. When a remote assistant needs to act on behalf of a specific user, issue and verify a scoped bearer token yourself: the `mcp` package's resource-server shell verifies tokens minted by your application or checked through authorization-server introspection ([MCP Servers](/developers/mcp-servers/#authentication-and-authorization)). Without a verified token, treat every remote MCP caller as anonymous and restrict its tools to public data.
+
+## Revocation
+
+Platform capability tokens carry epochs so policy updates invalidate earlier authority. In the same way, sessions from the `auth` package record the subject's generation. Calling `POST /auth/sign-out-everywhere` bumps that generation so every older session fails on its next request, and removing someone from the access list blocks them on their next request as well. Apply the same generation check to application-defined roles so role downgrades reject stale sessions immediately.
+
+The `auth` package does not implement passwords, second factors, or SCIM provisioning. If you add any of those flows, enforce the same revocation rule when a password changes, an authentication factor is removed, or an account is deprovisioned: every session issued prior to the event must fail on its next request. Because `auth` increments a subject's generation only when that subject calls `POST /auth/sign-out-everywhere`, keep and verify your own revocation counter in the store for server- or admin-initiated revocations.
+
+Next: wire up user sign-in in [Authentication](/developers/authentication/), or lock down credentials and outbound hosts in [Secrets & Egress](/developers/secrets-egress/).

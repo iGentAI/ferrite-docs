@@ -1,0 +1,68 @@
+---
+title: "WebMCP & OpenAPI"
+description: "Generate an OpenAPI catalogue from your Surface and expose the same operations as WebMCP tools to the assistant in a user's browser without duplicating domain logic."
+section: "Assistants & MCP"
+order: 5
+---
+
+External HTTP clients and agents discover your API through OpenAPI, which `agent-ready` generates directly from your `Surface`. When a user already has your app open in a browser with an assistant, WebMCP lets that page expose the same operations as browser tools under the user's active session. You register WebMCP tools in your page's script using the same operation names and input schemas as your `Surface`, so browser tools, OpenAPI, and `/mcp` all point at the same backend handlers.
+
+WebMCP is an emerging browser API behind Chrome's `WebMCP` feature flag. Treat it as a progressive enhancement for assistants running inside the browser; assistants running anywhere else call the same operations through your application's `/mcp` endpoint.
+
+## Register a browser tool
+
+```js filename="site/agent-tools.js"
+const registration = new AbortController()
+
+await document.modelContext?.registerTool({
+  name: "list_products",
+  title: "List products",
+  description: "List products with current price and availability.",
+  inputSchema: {
+    type: "object",
+    properties: { query: { type: "string" } },
+    additionalProperties: false
+  },
+  annotations: { readOnlyHint: true, untrustedContentHint: true },
+  execute: async ({ query }) => {
+    const response = await fetch(`/api/products?q=${encodeURIComponent(query ?? "")}`)
+    if (!response.ok) throw new Error(`products request failed: ${response.status}`)
+    return response.json()
+  }
+}, { signal: registration.signal })
+
+// Abort when the page, route, or signed-in context that owns the tool leaves.
+window.addEventListener("pagehide", () => registration.abort(), { once: true })
+```
+
+Feature-detect `document.modelContext` so your standard HTTP interface continues to work in browsers without WebMCP support. Ferrite's documentation site and dashboard register tools on `document.modelContext`; if you want a fallback across early browser implementations, check `navigator.modelContext` when `document.modelContext` is absent. Passing an `AbortSignal` binds the tool's lifetime to the page, route, or signed-in context that registered it.
+
+## Reuse the browser session safely
+
+Because `execute` calls `fetch` on the same origin, the browser attaches your application's `HttpOnly` session cookie automatically without revealing it to JavaScript, tool results, or the assistant. Mutating tools must still satisfy your app's normal CSRF and idempotency checks.
+
+Never place a session bearer token in `localStorage`, a tool description, tool arguments, the page URL, or MCP output.
+
+## Generate OpenAPI
+
+`agent-ready` generates an OpenAPI 3.1 catalogue from `Surface.routes[].operations` and serves it at `/.well-known/api-catalog`, with `/openapi.json` as an alias. Each operation's `name` becomes its `operationId`.
+
+The generated document includes:
+
+- Your declared `input_schema`, plus `output_schema` when provided.
+- An `idempotency-key` header parameter on every `POST` operation, documented as retry-safe only when `idempotent` is true.
+- `read_only` and `idempotent` traits.
+- An RFC 9457 problem-details error response.
+- Price metadata and a `402` response for priced operations.
+
+The catalogue does not emit authentication schemes or rate-limit definitions. State in each operation's `description` whether the call requires a signed-in user or bearer token, and describe what a refused or throttled caller receives. See [What the package does not do](/developers/agent-native-apps/#what-the-package-does-not-do) for the package's other boundaries.
+
+## Content for agents
+
+`agent-ready` serves a Markdown representation of each declared page at its `.md` path, at `?format=md`, and at the page's canonical URL when the request sends `Accept: text/markdown`. Content negotiation on `Accept: text/markdown` requires forwarding the `accept` header in `ferrite.json`, and your app must preserve the `Vary: Accept` header the package returns so caches separate HTML from Markdown.
+
+The Markdown body comes from your `PageSource`: keep headings, code blocks, tables, and links, and omit navigation headers, sidebars, cookie banners, and other visual chrome. Include an alternate `<link>` to the Markdown version in your HTML `<head>`.
+
+This documentation site exposes `search_ferrite_docs` and `read_ferrite_doc` as WebMCP tools and renders Markdown directly from the same MDX collection.
+
+See [Dashboard WebMCP](/developers/dashboard-webmcp/) for an example of pairing a signed-in interface with a read-only browser tool without exposing the session cookie.

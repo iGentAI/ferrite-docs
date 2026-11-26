@@ -1,0 +1,191 @@
+---
+title: "MCP-only Operations"
+description: "Deploy and operate a Ferrite application over the hosted MCP endpoint alone: read every verdict from the payload, submit source once, reconcile lost replies from rcs_log, and manage builds, trials, and recovery."
+section: "Deploy"
+order: 5
+---
+
+Use Ferrite's hosted MCP endpoint to build and operate an application directly from an agent or script. The public MCP contract accepts source files, reports build status, and exposes account-scoped lifecycle controls with only the endpoint URL and a bearer token.
+
+If your agent has shell access, use the `ferrite` CLI instead. `ferrite deploy` keeps a local attempt journal, submits once, follows the build, and reconciles a lost reply without submitting again (`ferrite deploy resume`). Follow this guide when your client has only an MCP connection and must enforce submit-once and reconciliation discipline itself, because `deploy_source` takes no idempotency key.
+
+Submit source once, save the returned `build_id`, read the verdict from the response payload, and reconcile any uncertain submission before sending another request. Those habits prevent duplicate builds and duplicate deploy fees when a reply drops in flight.
+
+An MCP client that signs in through the browser (Claude, ChatGPT, Codex, Cursor, Gemini, OpenCode, or Claude Code with the remote server) needs no token handling at all. Add `https://mcp.ferrite.cloud/mcp` as a remote server; its first account call opens Ferrite's connect page, where **Try Ferrite without an account** starts a 48-hour trial and **Sign in to your Ferrite account** reaches an account you already own. Such a connection never calls `provision` or `provision_ephemeral`. [Connect any agent to your Ferrite account](/developers/connect-any-agent/) lists the command for each client.
+
+A script or raw client sends every call as a `POST /mcp` request carrying a bearer token in the `Authorization` header (see [Protocol reference](#protocol-reference)):
+
+```bash
+curl -s https://mcp.example.com/mcp \
+  -H 'content-type: application/json' \
+  -H 'accept: application/json, text/event-stream' \
+  -H 'authorization: Bearer <token>' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"account","arguments":{}}}'
+```
+
+The platform returns each tool payload in two places: as a parsed JSON object in `result.structuredContent` and as serialized JSON text in `result.content[0].text`.
+
+## Read the verdict from the payload
+
+Ferrite sets `isError` to `true` on refusals and `false` on every normal reply, including negative verdicts such as a failed build or an invalid manifest. A client that stops at `isError` will treat a failed build or a rejected spec as success. Inspect every response in this order:
+
+1. Check HTTP status first. HTTP 401 with `{"error":"unauthorized"}` means a protected tool was called without a bearer token. HTTP 401 with `{"error":"invalid_token", ...}` and a `WWW-Authenticate` header naming `invalid_token` means the bearer token matches no active account (it expired, was revoked, or was rotated); obtain a new credential and do not retry. HTTP 403 means the server rejected the request's `Origin` header.
+2. Check for a JSON-RPC `error` object. Code `-32602` (`unknown tool or invalid arguments`) marks a missing tool or bad parameters. Code `-32601` marks a missing method (under protocol revision `2026-07-28`, it arrives with HTTP 404, while envelope faults return HTTP 400 with `-32602` or `-32020`). Code `-32700` means the server could not parse the body, and JSON-RPC batch arrays return `-32600` (`invalid request`).
+3. Check for a tool refusal (`isError: true`), identified by the payload's top-level key: `Error` (a diagnostic message), `Unauthenticated` (a credential passed in the `token` argument without an `Authorization` header is unknown), `NotOwner {app}` (missing app or owned by another account), `Rejected {reasons}` (the admission gate refused the manifest or source), `QuotaExceeded {resource, requested, cap}`, or `InsufficientCredit`.
+4. Check for a lowercase `{"error": "missing 'app'"}` payload, which indicates a malformed tool call.
+5. Check for negative outcomes inside an `isError: false` payload. `validate_spec` returns `{passed: false, ...}`, `code_gate` returns `{admitted: false, ...}`, `estimate_cost` returns `{Estimate: {spec_valid: false}}`, `verify_domain` with a mismatched token returns `{DomainVerified: {verified: false}}`, and `build_status` reports `failed`, `rejected`, `cancelled`, or `stuck` in its `state` field.
+
+`AlreadyProvisioned`, `AlreadyReleased`, and `AlreadyFunded` report that the target state already holds. `AlreadyProvisioned` returns no token: an account's credential is issued once by `provision` or `claim`, and no tool re-issues it, so save it immediately before calling anything else. When `tools/list` exposes credential tools, a token holder can rotate with `rotate_token` and `confirm_token`, revoke all other tokens with `revoke_other_tokens`, and list credentials with `credentials`. The account's human owner can replace every token from the Dashboard billing page.
+
+## Prepare the submission
+
+The `spec` argument takes a serialized JSON string (a string containing the manifest JSON, never a nested JSON object). The parser rejects unsupported keys: application-level `auth` and `required_secrets`, route-level `stream_mode`, `forward_headers` on `stream` or `ws` routes, and `native` on a `depends` entry. When adapting a manifest the parser refuses, replace the intended security or rate-limiting behavior with a supported mechanism before dropping a key. Passing manifest parsing proves syntax validity only; it supplies no substitute protection.
+
+Enforcement of `rate_limit_per_min` is not established on Ferrite Cloud. Both `ferrite deploy` and `ferrite cost` block any manifest containing `rate_limit_per_min` and explain why. Keep the key if you declared it, and never call raw `deploy_source` to bypass that hold. Because `deploy_source` has no server-side hold for this key, an MCP-only client must enforce the same rule itself and refuse to submit manifests carrying `rate_limit_per_min`. See [Rate limits](/developers/rate-limits/) for the hold details and how to bound routes with the `http-route-budget` package.
+
+Declare an explicit `workload` on every service. Omitting `workload` reserves one-sixteenth of its plane group; on a shared fleet, that causes placement to fail after the full build finishes (the deploy fee is refunded, but the build time is lost).
+
+`validate_spec {spec}`, `code_gate {files}`, and `estimate_cost {spec}` carry no charge and can be repeated freely (`validate_spec` and `code_gate` require no bearer token). Resolve every violation before deploying. A passing `code_gate` checks source policy only; it does not compile the crate, so code that fails `rustc` can still pass admission.
+
+For cryptography and random IDs or tokens, `ferrite_app::crypto` on Ferrite Cloud exports `sha256`, `hmac_sha256`, `ct_eq`, `hex`, base64, and JWT/signature keys only — there is no `ferrite_app::crypto::random_bytes`, `random_token`, or `AppContext::entropy`, and `code_gate` refuses `rand`, `getrandom`, and `std::fs`. Pass `"packages": ["sha256-hmac"]` to `deploy_source` and use `crate::crypto::random_bytes` / `random_token`, or derive 32 OS-CSPRNG bytes inline with `ferrite_app::crypto::hmac_sha256(&ferrite_app::crypto::Ed25519SigningKey::generate_pkcs8(), b"my-app/token/v1")`.
+
+Before the first deploy of a new application, call `estimate_cost {spec}` (CLI equivalent: `ferrite cost`) and report the deploy fee, projected monthly cost, and current account balance to the account owner. On a durable account, wait for approval before proceeding. The installation sets the deploy fee and includes it in the estimate; projected monthly cost depends on instance count, per-instance memory and CPU, and reserved service capacity. See [Deployments](/developers/deployments/#before-you-deploy-what-it-will-cost) for how to read the estimate.
+
+Set every secret your code reads with `set_secret {app, name, value}` before the first deploy, then confirm the stored names with `list_secrets {app}`. Both work on an application name before its first deployment. The platform does not block a deploy for missing secrets, and raw `deploy_source` skips the CLI's secret checks, so compare `list_secrets {app}` against the names referenced in your code before submitting. Secrets reach a running process only through a deploy: running instances never observe values changed after startup, and scaling to zero and back restarts with the previous deploy's context.
+
+If a secret stores the application's own address (such as the `auth` package's `auth_public_origin`), resolve the host before the first deploy:
+
+- Call `app_host {app}` when `tools/list` includes it. It returns the host, origin, and both OAuth callback URLs before any deploy, marked as derived until a deploy confirms them.
+- If `app_host` is absent, compute `<shortcode>.<domain>`, where `<domain>` is the MCP endpoint host without its `mcp.` prefix and `<shortcode>` is the first 80 bits of `SHA-256("<account>/<name>")` (using the account ID reported by `account`), interpreted as a big-endian integer and formatted as 16 lowercase base-36 digits (`0-9a-z`). `ferrite host` computes the same address.
+- Without either option, deploy once, read `host` from `build_status` or `list_apps`, set the secret, and deploy again.
+
+## Repair an existing application
+
+Preserve the existing account, application name, service names, and security requirements. Inspect the live source with `rcs_checkout {app}`. If your client saves a large checkout response to disk, read only the files relevant to the repair from that saved copy; do not repeatedly dump or repackage the full generated source tree.
+
+1. Edit only the authored files required for the fix. Leave unchanged package files intact in the repository and adapt package behavior at the application boundary when possible.
+2. Run the relevant spec and source checks. `code_gate` verifies source policy only, never compilation or runtime correctness.
+3. Submit `rcs_commit {app, files, message}` with only the modified files, and include the complete text of each modified file. `rcs_commit` overlays the repository head: omitted files remain intact and are not deleted. Keep the manifest unchanged unless the repair requires a manifest edit, and verify that its application name matches the target app.
+4. Save `RcsCommitted.commit`. Run required tests against that exact commit with `test_ref {app, reference: commit}` and wait for `tested`. Neither `code_gate` nor an alternate deploy path satisfies a required test verdict.
+5. Submit `deploy_ref {app, reference: commit}` once. It reads the committed manifest (`spec_path` defaults to `ferrite.json`) and builds the complete source tree. Save `BuildStarted.build_id`, poll `build_status`, then verify both the repaired behavior and existing stored data at the serving host.
+
+This flow shrinks upload payloads without relaxing build, test, authentication, rate-limit, storage, or lifecycle gates. If any submission loses its reply, reconcile the outcome before retrying; an uncertain reply never justifies starting a second build. Never withdraw a serving app to update its source.
+
+## Deploy once
+
+`deploy_source {spec, files, instances?}` returns `{BuildStarted: {app, build_id, note}}` and launches an attested build. It is not idempotent and accepts no idempotency key: sending identical source twice starts two builds and charges two deploy fees.
+
+1. Before submitting, record the attempt in your journal as in flight: target app name, request digest, local timestamp, and the build IDs already present in `account_statement`.
+2. Call `deploy_source` once. Save `build_id` the moment `BuildStarted` arrives, before evaluating anything else.
+3. Poll `build_status {build_id}` (pass `wait_s: 50` where supported so the server holds the request up to 50 seconds for a state change) until the state reaches `deployed`, `failed`, `rejected`, `cancelled`, or `stuck`. Keep polling while the state is `building`, `deploying`, or `undoing`. A `failed` build was rolled back and refunded; inspect `reasons`. Placement refusals (such as `"no conductor peer could report placement"` or `"FULL on the rate axis"`) arrive only after the build completes, and any follow-up deploy starts a new charged build.
+4. A `deployed` state means the platform registered the new generation; instances may still be starting. Poll `status {app}` until `running` is at least 1 and `observed_generation` matches the deployed generation, then send a real HTTP request to the application's host. A green build alone does not verify a live deployment.
+
+Configure a request timeout on `deploy_source` longer than a standard 30-second client default. Multi-megabyte source uploads can take nearly 30 seconds to acknowledge under load.
+
+## Reconcile a lost reply from `rcs_log`
+
+When a `deploy_source` request drops without a response, its outcome is unknown and you must not resubmit on that basis. `deploy_source` commits the submitted tree to the application's hosted repository as `deploy <build_id>: n file(s)` the instant the build is minted. A started build therefore appears immediately in `rcs_log {app, limit: 20}`, even on a first deploy when `status`, `list_apps`, and `account_statement` still show nothing.
+
+Adopt a candidate `build_id` from `rcs_log` only when every one of these four conditions holds:
+
+1. It is not already bound to an earlier attempt in your journal and did not appear in your pre-submit `account_statement` baseline.
+2. Its mint timestamp (the `<ms>` segment in `bj-<ms>-<hex>`) falls inside your request's in-flight window widened by 10 seconds on each side.
+3. `build_status {build_id}` returns a `BuildState` whose `app` equals `<account>/<app>`.
+4. Fetching that deploy commit with `rcs_checkout {app, reference: <commit>}` and comparing its files (with `spec` stored as `ferrite.json`) reproduces the request digest saved in your journal.
+
+All four checks are required because a teammate or CI job can deploy the same app inside the same time window, so identity, timestamp, and baseline alone can match someone else's build. If exactly one candidate satisfies all four conditions, adopt it and follow `build_status`. If two candidates match, or if a candidate's source digest differs, adopt none and resolve manually.
+
+One case writes no commit: a redeploy whose source matches the previous commit byte for byte (the standard way to deliver a changed secret). When `rcs_log` has no new entry, check `account_statement` instead. Charged builds record a `deploy fee build=<id> sha=...` debit (failed builds record both the debit and a `deploy fee refund` credit). Because statement entries appear only after the build is charged, an empty statement proves nothing while a build may still be running. Keep the journal attempt open and re-read `account_statement` until a candidate appears or 30 minutes have passed since the request (the settle window `ferrite deploy` uses).
+
+That 30-minute window is a client wait policy; the platform imposes no matching timeout, so an in-flight build can still surface and charge after the window closes. Once 30 minutes pass with no match, mark the attempt unknown, retain its journal entry, and do not auto-retry `deploy_source`. Check `rcs_log`, `account_statement`, and the Dashboard builds page once more. Submit again only after a human accepts that a second build and deploy fee may result, record that submission as a new journal attempt, and never replay the old attempt. Synchronous gate refusals (`Rejected`) mint no operation and write no commit, so a lost `Rejected` reply looks identical to an unreceived request once the window ends.
+
+`ferrite deploy` automates this workflow through a local journal. After a dropped reply, `ferrite deploy resume` reattaches to the journaled attempt and reconciles it by reading `rcs_log` and `account_statement` without resubmitting source.
+
+## The release and preview verbs are polled too
+
+`preview_ref`, `deploy_release`, `promote`, and `rollback_release` run asynchronously, like `deploy_source`. Each returns `BuildStarted {build_id, app}` immediately; persist `build_id`, poll `build_status`, and do not resubmit while the operation is building.
+
+A preview finishes with `PreviewDeployed {app, preview_app, host, expires_at_ms, commit}`. The three release verbs finish as `deployed` once the environment's pointer advances to the release, or `pointer_denied` when the environment's deploy authority refused the pointer update (the application artifact still deployed).
+
+`promote` can also fail synchronously before starting a build, identified by the leading code in the refusal:
+
+- `RELEASE_ON_TRIAL`, `RELEASE_MOVED`, `RELEASE_UNREAD`: transient state; call `promote` again later.
+- `RELEASE_FAILED`, `RELEASE_NOT_RUNNING`, `RELEASE_GONE`: the source environment requires a healthy deploy first.
+
+## Operate
+
+| Tool | Behavior and edge cases |
+| --- | --- |
+| `scale {app, instances}` | Scaling to `0` stops serving while keeping the app and its data. Requests wait until the gateway deadline and return 504; `status.last_error` may show `"placement pending"` or a drain-deadline message under normal conditions. Scaling back up restarts instances with the previous deploy's context. Negative counts fail with `{"error": "invalid tool argument type or range"}`. |
+| `rollback {app}` | Switches to the previous artifact. A second `rollback` switches forward again, so it alternates between the last two builds. Returns `Error: ... has no previous artifact` when none exists. |
+| `withdraw {app}` | Cancels any in-flight deploy or fork on the app name, unpublishes routes, and removes the row from `list_apps`. Nothing started before `withdraw` returns can land afterward. Idempotent. |
+| `cancel_deploy {build_id}` | Aborts a single deploy still building or waiting on capacity without withdrawing the app. Returns `cancelled` (nothing landed and any fee was refunded), `deployed` (already finished), or `undoing` (cleanup still running). |
+| `retry_park {app}` | Retries a parked app (stopped after crash loops) once you fix the cause. Uses the same reply variants as `resume`. |
+| `fork {app, fork_app, as_of_unix_micros?}` | Creates a copy-on-write clone of a running app, its code, and every bound per-resource service cut at one instant, served at its own host under `fork_app`. Returns `BuildStarted`; poll `build_status` until `deployed` (which carries the fork's host and one status line per service). Optional `as_of_unix_micros` (within the last 14 days) forks historical state. The original keeps serving and writes stay isolated across forked services; withdraw the fork when finished. Call `read_docs {doc: "forking"}` for full details. |
+| `describe {app}` | Returns the serving host, artifact, instance counts, generation, compute bounds, and autoscale policy. |
+| `service_costs {app}` | Reports what each bound service reserves and its charges. |
+| `dead_letters {app, service}` / `remove_dead_letters` | Lists a queue's dead letters and deletes them, so their bytes return to the service's `volume_mib`. |
+| `repository_usage` / `delete_repository {app}` | Reports hosted source repository usage against account limits, and permanently deletes the repository of a withdrawn or never-deployed app (irreversible). |
+
+Additional operational behavior to account for in MCP clients:
+
+- Every control mutation (`scale`, `rollback`, and other control verbs) increments `generation`, so it tracks state transitions across all control operations. An application's host never changes across deploys, scales, rollbacks, or domain bindings.
+- `deploy_history`, `releases`, and `environments` reflect only the release workflow (`cut_release`, `deploy_release`) and stay empty for apps deployed with `deploy_source`. Read `rcs_log` and `account_statement` for source-deploy history.
+- `claim_domain` performs no name validation, `verify_domain` checks the token against the issued value without reading DNS, and `bind_domain` takes seconds to minutes to start routing. The owner must still publish two CNAME records and the TXT verification record before HTTPS serves. Domain claims are first come, first served across the installation, cannot be released, and bindings survive `withdraw` (see [Domains](/developers/domains/)).
+- Organization roles set through `set_member` do not grant a member's own token access to the organization's applications beyond `members`.
+- `usage {app}` lags behind live traffic, and `logs {app}` is scoped per application and per generation.
+
+## Keep a trial app past its 48 hours
+
+A trial account lasts 48 hours and starts with $50 of credit. It runs one instance per application with 256 MiB of memory and half a CPU. When the 48 hours expire, the account closes and every app still running in it is withdrawn, unless a person keeps it first.
+
+The person keeps it through `claim_url`, which works on every trial connection, including one a connector started. Offer it when the person mentions an existing Ferrite account, wants to keep the work, or wants Ferrite on another device: check `owner_status`, call `claim_url` when no owner is linked, and give the person only the returned `url`, privately. After Google or GitHub sign-in the page offers two choices:
+
+- **Keep this as my account**: the trial becomes a new durable account of the person's own, with the same apps, URLs and data and no deadline or trial caps. Its ID changes from `eph-…` to a readable one, and every connection and CLI login of the trial follows it: the next call is refused once with `401 invalid_token`, the client refreshes, and the refreshed token acts as the new account.
+- **Move it into** an account that identity already owns: the apps move with their IDs, URLs and data, and every connection and CLI login of the trial follows them the same way, without re-authorizing.
+
+These two choices appear for a trial the Dashboard holds: one started by `ferrite login --ephemeral` or by **Try Ferrite without an account** on the connect page. For a trial a script opened with `provision_ephemeral`, the link attaches an owner and the 48-hour deadline stays; move its apps with the procedure below.
+
+Call `owner_status` and `account` afterwards to confirm. An account that already has an owner refuses `claim_url`; another agent reaches it by signing in on the connect page, or with `ferrite login --sign-in`.
+
+A script that cannot hand a link to a person can still move trial apps itself with the `claim` tool and the trial's claim secret. To move a trial app that way over hosted MCP (the CLI is optional), store credentials in a private client profile and redact tool arguments and responses from transcripts. If a connector cannot store secrets privately, hand the transfer to a client that can.
+
+1. When creating a trial, call `provision_ephemeral` once. Store both `EphemeralProvisioned.token` (to operate the trial) and `EphemeralProvisioned.claim_token` (to transfer its apps before `expires_at_ms`) privately. Never place either token in a URL.
+2. On the trial connection, record the original account-qualified app ID, its serving host, and a small stored value you can verify after transfer.
+3. Open a separate connection for the destination durable account on the same installation. Use an existing durable account you control, or call `provision` once with a new account ID and save the returned credential before transferring anything. Verify the destination with `account`, check its balance with `account_statement`, and check its tier against the manifest with `estimate_cost`. The destination must have enough credit to run and update the app. `AlreadyProvisioned` returns no credential; if you lack the destination credential, recover access before proceeding.
+4. Authenticated as the destination account, call `claim` once with only the trial's claim secret. Omit `owner_id`. The expected response is `ClaimedInto`. Your durable credential stays valid even if the reply drops.
+
+   ```json
+   {"name":"claim","arguments":{"claim_token":"<private trial claim secret>"}}
+   ```
+
+5. Using the destination credential, read `list_apps`, query `status` with the original app ID, and request the original host to confirm your saved data value survived. If the `claim` reply was lost, inspect this state before taking action; retain both profiles and the original claim secret while the outcome is uncertain. Never provision a replacement account or repeat `claim` to check the result.
+6. For future updates to a transferred app, pass its original account-qualified app ID to `rcs_checkout`, `rcs_commit`, `test_ref`, and `deploy_ref`. Check both `BuildStarted.app` and the final `build_status` `app` field against that original ID. If either differs (for instance, if the build targeted the destination account's prefix instead), stop, keep the build receipt, and report the mismatch. Do not retry with a short app name or treat a new URL as a replacement. Confirm a higher generation, updated content at the original URL, and intact stored data before marking the update complete.
+7. Check `owner_status` on the destination durable account. If no owner is linked and the account owner wants Dashboard access, request `claim_url` and deliver only that link privately; signing in there attaches the owner.
+
+## Documentation search, packages, hosts, resume, and Dashboard links
+
+Not every Ferrite installation exposes every tool in this section. Inspect `tools/list` for `search_docs`, `list_packages`, `read_package`, `app_host`, `describe_services`, `resume`, and the `wait_s` parameter on `build_status` before relying on them.
+
+- `search_docs {query, limit?}` searches published developer docs, support guides, and the platform documents served by `read_docs`. It requires no bearer token and returns `{query, total, results, hint}` with up to `limit` entries (1 to 20, default 8, at most two per document). Each entry contains `id` (same as `doc`), `title`, `category`, `section`, `heading`, `url`, `bytes`, `snippet`, and a `read` object. When no section contains every word of the query, results fall back to the highest-overlap sections and `hint` notes the fallback. Pass a result's `read` object to `read_docs` to fetch that section. `read_docs {doc: "<id>"}` returns short documents whole and longer documents (over roughly 16 KB) as a section-ID outline; request `{doc, section}` (one ID or up to 32) or `{doc, full: true}` for the body. When a developer page ID matches a platform document ID (such as `quickstart`), address the developer page as `developers/<id>`; the bare ID returns the platform document.
+- `list_packages {query?}` and `read_package {name, file?}` list Ferrite source packages and return a package's guide, source files, dependencies, and crate-root lines. Passing `packages` on `code_gate`, `deploy_source`, or `rcs_commit` injects those packages' files server-side before the gate or build reads `files`. See [Packages](/developers/packages/#use-a-package-without-a-shell).
+- `app_host {app}` returns an application's host, origin, and OAuth callback URLs before its first deploy, as described in [Prepare the submission](#prepare-the-submission).
+- `describe_services {app}` lists the services in the current deployment record: each binding's `handle`, `primitive`, shard count, `replication`, and the record's `generation`.
+- `build_status {build_id, wait_s?}` accepts `wait_s` from 0 to 50 to hold the call while a build is `building`, `deploying`, or `undoing`. It returns as soon as the state changes or the wait expires, so your client needs no sleep loop.
+- `resume {app}` is an alias for `retry_park {app}` with identical replies and backs the Dashboard **Resume** button. It retries a parked app immediately through fresh account admission instead of waiting for automatic retry. Ferrite parks apps whose instances crash-loop or fail startup preparation before app code executes (`status` reports `park_phase` and `park_retry_after_ms`). An app stopped for zero balance is not parked: it restarts at its recorded instance count once the account is funded, and `resume` returns `Error` for it (see [Scaling & Releases](/developers/scaling-releases/#recover)). Possible replies: `ParkRetryStarted {app, generation}` when placed again (follow with `status`), `ParkRetryBlocked {app, resource, requested, cap, retry_after_ms}` when admission still refuses it (add credit via `billing_portal` or lower compute, then retry), `ParkedMutationRefused {app, phase, retry_after_ms}` while a retry is already pending, and `Error` when the app is not parked.
+- `links` appears inside the top-level key of successful replies that reference an app, build, or account and contains ready-to-use Dashboard URLs. App replies include `dashboard`, `logs`, `usage`, `builds`, `releases`, and `settings` (plus `build` on `build_status` and deploy tools); `account`, `owner_status`, and `credentials` link account overview, usage, and billing pages; `list_apps` links each app and the account; `account_statement`, `notifications`, `list_domains`, and `members` link their respective pages; and `billing_portal` returns `dashboard_url`. Give these URLs directly to users instead of building Dashboard paths by hand.
+
+## Protocol reference
+
+Send `POST /mcp` with `content-type: application/json`, `accept: application/json, text/event-stream`, and `authorization: Bearer <token>`. Every request is standalone, with no `initialize` call or session header required. Requests without an explicit protocol version are served as `2025-03-26`. The server supports two protocol eras, selected per request:
+
+- Handshake revisions `2025-11-25`, `2025-06-18`, `2025-03-26`, and `2024-11-05`. An `initialize` request asking for an unsupported revision receives `2025-11-25`.
+- Stateless revision `2026-07-28`, selected when `params._meta` includes `io.modelcontextprotocol/protocolVersion` and `io.modelcontextprotocol/clientCapabilities` and the `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` headers mirror the body. `server/discover` is available only under this revision.
+
+An unknown `MCP-Protocol-Version` header or unknown `_meta` protocol version fails with HTTP 400 and `-32022` (the error `data` lists supported revisions). Sending a `2026-07-28` header without the `_meta` envelope returns HTTP 400 with `-32602`, and a header that disagrees with the body returns HTTP 400 with `-32020`. JSON-RPC batches fail with `-32600`, and `GET /mcp` and `OPTIONS` return HTTP 405. `tools/list` returns every tool in one page and ignores `cursor`.
+
+Send the credential in the `Authorization` header and omit the `token` argument. Every authenticated tool also accepts a `token` argument strictly for clients that cannot set HTTP headers. When both a header and a `token` argument are present, they must match; a mismatch fails with `CredentialConflict` before reaching the platform.
+
+Inspect `tools/list` to see what an installation serves. Submit source with `deploy_source`, or commit with `rcs_commit` and deploy with `deploy_ref`, and track every build through `build_status`. Tools under [Documentation search, packages, hosts, resume, and Dashboard links](#documentation-search-packages-hosts-resume-and-dashboard-links) appear only on installations that enable them.
+
+See [Deployments](/developers/deployments/), [Scaling & Releases](/developers/scaling-releases/), and [Domains](/developers/domains/).

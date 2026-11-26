@@ -1,0 +1,175 @@
+---
+title: "Queues"
+description: "Hand work to competing consumers with leases, delayed delivery, attempt budgets, dead-letter queues, and ordered keys."
+section: "Data"
+order: 3
+---
+
+Ferrite Queues distribute asynchronous work across competing consumers without
+losing messages when a process exits. A consumer holds a time-bounded lease and
+calls `ack` only after the effect of the work has been recorded.
+
+## Declare and consume a queue
+
+Declare a `queue` service and bind it to your worker in `ferrite.json`:
+
+```json filename="ferrite.json"
+{
+  "services": [{ "name": "emails", "primitive": "queue" }],
+  "applications": [{
+    "name": "email-worker",
+    "artifact_key": "apps/email-worker@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "emails", "kind": "queue", "service": "emails" }
+    ]
+  }]
+}
+```
+
+Poll leases from `AppContext`, apply the effect, and acknowledge the token:
+
+```rust filename="src/email_worker.rs"
+let mut emails = ctx.queue("emails")?;
+loop {
+    let Some(lease) = emails.poll_wait(1_000).await? else { continue };
+    send_email_idempotently(&lease.payload).await?;
+    emails.ack(lease.token).await?;
+}
+```
+
+If the worker exits before calling `ack`, the lease expires and another consumer
+receives the message, so your effect must be idempotent. Lease duration and
+attempt budgets are configured by the installation rather than in your manifest,
+and active leases cannot be extended. When a job can outlast a single lease,
+record progress in a Store as it runs so a second delivery sees finished work or
+resumes cleanly.
+
+## Delay and retry work
+
+Use `publish_at(payload, not_before_ms)` to delay delivery until an absolute
+timestamp in epoch milliseconds (`ctx.now_ms() + delay_ms`). Delayed messages
+fit reminders, reservation expiry, and retry backoff.
+
+The platform bounds repeated failure with an attempt budget. Work that exhausts
+the budget moves to the dead-letter queue, which the queue's `counts` report.
+Each lease carries two metadata fields:
+
+- `attempt` holds the 1-based delivery number so your consumer can distinguish
+  a first attempt from a retry.
+- `publisher` holds the platform-verified subject of the connection that
+  published the message (platform build only). It is empty when publishing is
+  ungated; when populated, trust it over any identity claimed inside the
+  payload.
+
+In the platform build, the queue handle exposes four dead-letter methods:
+
+| Method | Behavior |
+| --- | --- |
+| `dead_letters(after, limit)` | Lists dead letters oldest first, up to 1,000 per page. |
+| `read_dead_letter(id)` | Returns the payload of one dead letter. |
+| `remove_dead_letters(&ids)` | Deletes up to 1,000 dead letters per call. |
+| `redrive_dead_letters(limit)` | Republishes plain dead letters and removes them (at-least-once). Ordered dead letters stay in place and are counted in the result. |
+
+When a broken application cannot drain its own dead letters, an owner can manage
+them through MCP tools instead: `dead_letters` takes `app`, `service`, and
+optional `after` and `limit` pagination parameters, and `remove_dead_letters`
+takes `app`, `service`, and either `ids` (up to 1,000 per call) or `all` (up to
+16,000 per call; repeat while `remaining` is above 0). MCP provides no redrive
+and does not return payloads.
+
+Dead letters remain in the queue until removed or redriven and count against the
+queue's `volume_mib`. A queue full of dead letters refuses new publishes until
+you clear them. Removing the dead letter that stalled an ordered key also
+restores the key, as described in
+[Deliver one key's messages in order](#deliver-one-keys-messages-in-order).
+
+## Deliver one key's messages in order
+
+Plain messages have no ordering guarantee. When messages sharing a key must be
+delivered in sequence, publish them with
+`publish_ordered(payload, key, seq, last)`:
+
+- `key` identifies the ordered stream and holds at most 255 bytes.
+- `seq` numbers the message within its key. Pass `None` to take the key's next
+  sequence number; republishing a sequence number that already landed returns
+  `Duplicate` without writing a second copy.
+- `last` marks the final message that closes the key.
+
+Call `poll_grant(max, timeout_ms)` to receive up to 256 leases with each ordered
+key's run kept in sequence, and call `ack_batch(&tokens)` to acknowledge them in
+one round trip.
+
+If an ordered message exhausts its attempt budget, that message and every later
+message for the same key move to the dead-letter queue together, and the key
+refuses further publishes. Removing the dead letter where the key stopped brings
+its later messages back in order, with a gap at the removed sequence number.
+
+## Cancel scheduled work
+
+The platform queue handle has no cancel operation: every published message,
+delayed or immediate, will be delivered. To withdraw scheduled work, store a
+versioned schedule record beside each reminder, retry, or workflow wake. When the
+message arrives, recheck that version and acknowledge unwanted work without
+acting on it.
+
+A version check can still race with an active consumer or an external provider
+call, and cannot undo an effect already committed, so make replacement schedules
+and provider effects idempotent.
+
+The local SDK that `ferrite dev` compiles against declares a `cancel` method
+that the platform lacks; do not call it. `ferrite check --target upstream`
+reports references to its result type (`CancelOutcome`), though it does not flag
+a bare call to `cancel`.
+
+## Scale consumers
+
+```bash
+ferrite dev --instances 3
+ferrite dev --instances 3 --chaos 5
+```
+
+The first command starts three competing consumers locally. The second kills and
+restarts them roughly every five seconds so you can observe redelivery and
+verify idempotency before deploying. In a deployment, your application's
+instances act as competing consumers; see
+[Scaling & Releases](/developers/scaling-releases/).
+
+A queue service runs as one group and never shards. Ferrite derives shard counts
+from declared rates and volume; manifests cannot set a shard count directly. Any
+queue declaration whose workload needs more than one group is refused with
+`SERVICE_QUEUE_UNSHARDED`. Lower the declared rates or `volume_mib`, or divide
+the work across multiple queue services.
+
+## Delivery semantics
+
+Ferrite records every delivery decision across the queue's replicas before
+handing out a lease. Delivery is at least once: any lease that expires before
+`ack` is delivered again to the same consumer or another.
+
+Ferrite cannot make an external side effect happen exactly once. Persist a
+provider event ID or idempotency record in your Store, send the provider's
+idempotency key whenever it supports one, and acknowledge the lease only after
+you can prove the effect landed.
+
+## What a queue keeps
+
+A queue retains every message across consumer crashes and application redeploys
+until it is acknowledged or moved to the dead-letter queue.
+
+## Methods only the platform build has
+
+The local SDK used by `ferrite check` and `ferrite dev` omits several queue APIs
+that exist only in the platform build:
+
+- Dead-letter methods: `dead_letters`, `read_dead_letter`,
+  `remove_dead_letters`, and `redrive_dead_letters`.
+- Ordered queue methods: `publish_ordered`, `poll_grant`, and `ack_batch`.
+- The `publisher` field on a lease.
+
+Code that uses these APIs compiles only in the platform build. The CLI has no
+dead-letter command; use the MCP `dead_letters` and `remove_dead_letters` tools
+described under [Delay and retry work](#delay-and-retry-work).
+
+Continue with [Cron Jobs](/developers/cron-jobs/) and
+[Workflows](/developers/workflows/).

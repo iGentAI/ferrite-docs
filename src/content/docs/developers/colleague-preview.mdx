@@ -1,0 +1,66 @@
+---
+title: "Build an app with a coding agent"
+shortTitle: "Build with an agent"
+description: "Install Ferrite, describe the app you want, deploy it, and claim its account."
+section: "Get started"
+order: 2.5
+---
+
+import AgentSetup from "../../../components/AgentSetup.astro"
+
+Install Ferrite, describe the app you want, and let your coding agent scaffold
+the crate, check it against platform rules, deploy it, and hand over the
+account. Setup opens a trial account if you do not have one yet.
+
+## Install Ferrite
+
+<AgentSetup />
+
+Start a new session in your coding agent after setup finishes so it loads the
+new MCP server and skill. Read [Agent setup](/developers/plugin/) for the two
+connection routes and the tools each exposes.
+
+## Ask your agent to build an app
+
+Describe what you want built. For example:
+
+<blockquote class="docs-agent-prompt">
+  <p>Build a bear shop on Ferrite. Before you deploy it, tell me what it will cost each month. Then deploy it and give me the live URL.</p>
+</blockquote>
+
+The agent scaffolds the project, validates it, prints the monthly estimate from
+`ferrite cost`, deploys it, and returns the live URL.
+
+Asking the agent to build and deploy an app authorizes that single deploy, so on
+a trial account it proceeds without prompting again and draws from trial credit.
+If you want to approve the cost before anything builds, say so in the prompt and
+the agent will wait for confirmation.
+
+## Claim the account
+
+Once the app is live, tell the agent:
+
+<blockquote class="docs-agent-prompt">
+  <p>Help me sign in to Dashboard for the account that deployed this app. If it has no human owner, give me its private ownership link.</p>
+</blockquote>
+
+Open the link it returns. The page displays the account ID, current balance, and
+number of apps. Sign in with Google or GitHub to become the account's owner; if
+that verified email already owns Ferrite accounts under a passphrase, enter that
+passphrase once to link this account. Claiming attaches the account and every
+app in it. Sign in to the [Dashboard](https://dashboard.ferrite.cloud/) with
+that provider account; the Dashboard lists only accounts you own.
+
+Linking an owner covers all apps in the account, though it does not extend a
+trial account's lifetime. A trial account lasts 48 hours, starts with $50 of
+credit, and runs one instance per app at 256 MiB of memory and half a CPU; when
+the 48 hours end, the account expires and its running apps are withdrawn.
+Keeping an app and its data at the original URL past 48 hours is a separate
+transfer into a durable account: follow the
+[CLI claim procedure](/developers/cli-commands/#ferrite-claim) or the
+[MCP-only transfer](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
+
+If your apps live under multiple account IDs, ask for a claim link for each
+account and claim them with the same verified email identity. If an account
+is already claimed, tell the agent to reuse the existing CLI or MCP connection.
+Never share a Ferrite bearer token; the claim link is all you need.

@@ -1,0 +1,120 @@
+---
+title: "Streams"
+description: "Append ordered events to a stored log, read them back by offset, and let consumers resume from saved checkpoints."
+section: "Data"
+order: 4
+---
+
+Ferrite Streams provide an append-only ordered history. Each accepted record
+receives a dense offset that consumers can checkpoint and replay.
+
+## Use a stream for history
+
+Use Streams for audit logs, domain events, analytics input, change feeds, and
+any sequence where order and replay matter. Use a [Queue](/developers/queues/)
+when one worker should own each unit of work.
+
+Streams on this page are stored logs that your code appends to and reads. To
+push live updates to a browser, use a `stream` route, which binds to a queue;
+see [Routing](/developers/routing/).
+
+A `topics` binding rides on a service declared with the `log` primitive. There
+is no `topics` primitive; declaring one fails with `SERVICE_PRIMITIVE_UNKNOWN`.
+
+```json filename="ferrite.json"
+{
+  "services": [{ "name": "audit-log", "primitive": "log" }],
+  "applications": [{
+    "name": "audit-api",
+    "artifact_key": "apps/audit-api@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "audit", "kind": "topics", "service": "audit-log" }
+    ]
+  }]
+}
+```
+
+```rust filename="src/audit.rs"
+let mut audit = ctx.topics("audit")?;
+audit.create_topic("security-events").await?;
+let offset = audit.append("security-events", tenant_id.as_bytes(), &event_bytes).await?;
+let records = audit.read_from("security-events", next_offset, 100).await?;
+```
+
+A `topics` binding (`audit` above) holds multiple named topics, each with its
+own sequence of offsets. `create_topic` is idempotent. `append` takes the topic
+name, a key, and value bytes, and returns the record's offset.
+`read_from(topic, from, limit)` returns up to `limit` records, each carrying its
+`offset`, `key`, and `value`. The handle also exposes `list_topics` and
+`delete_topic`.
+
+The client resends an unanswered `append` under the same request ID, so
+transport retries never write a record twice. An `append` can still fail with an
+unknown-outcome error when the client cannot confirm whether the record landed.
+If your code retries after an unknown-outcome error, include an event ID in the
+value so consumers can discard the duplicate.
+
+In the platform build, the handle also offers
+`read_from_wait(topic, from, limit, wait_ms)` to wait up to `wait_ms` for new
+records, and `read_from_bounded(topic, from, max_records, max_bytes)` to cap a
+page by byte size as well as record count. The local SDK used by `ferrite check`
+and `ferrite dev` does not declare these two methods, so code calling them
+compiles only in the platform build.
+
+Ferrite derives a log service's shard count from its declared rates and volume;
+manifests cannot set a shard count directly. When a topics service spans several
+shards, `append` routes each record by key so records of one key stay ordered,
+and offsets are dense per shard instead of per topic. Whole-topic reads are then
+refused by name; read each shard with `read_shard_from` (and its `_wait` and
+`_bounded` variants), or consume the topic through a consumer group. If a
+service may grow busy enough to shard, read per shard or use a consumer group
+from the start.
+
+When you need a single unnamed stream on the same `log` primitive, bind it with
+`"kind": "log"`. `ctx.log("name")?` exposes `append(key, value)` and
+`read_from(from, limit)`.
+
+## Consumers and replay
+
+A plain reader tracks its own place because Ferrite stores no cursor for
+`read_from`. Save the last processed offset in a Store record, and read from the
+next offset after a restart. Because offsets are dense, any gap between the
+offset you saved and the next record you read means events were missed.
+
+When several consumers share one topic, use `ferrite_app::topic_group` from the
+platform SDK. A `GroupConsumer` stores per-shard leases and committed cursors in
+one of your Store bindings:
+
+- `acquire` claims shards that no live consumer holds.
+- `poll` reads a held shard from its current cursor.
+- `commit` saves that position as the group's cursor.
+- `renew` keeps active leases well inside their lifetime.
+- `release` hands shards back cleanly during an orderly stop.
+
+Delivery is at least once: a consumer that loses a shard before committing leaves
+its successor at the last committed cursor, so make the work triggered by each
+record safe to repeat.
+
+The local SDK used by `ferrite check` and `ferrite dev` does not declare
+`topic_group`, so code using it compiles only in the platform build.
+`ferrite check --target upstream` flags each use of `ferrite_app::topic_group`
+with the warning `SDK_SYMBOL_ABSENT_LOCALLY`, whereas calls to `read_from_wait`
+and `read_from_bounded` are not reported by that check and fail local
+compilation.
+
+## Retention
+
+The platform's log policy sets retention; a topic has no retention setting of
+its own. If a consumer falls behind retention, report the missing range and
+recover from a snapshot or read model you maintain instead of skipping
+the missing events.
+
+## Audit data
+
+Append security and administrative events without secrets, tokens, passwords, or
+raw signed assertions. Record the tenant, pseudonymous subject when known, event
+type, outcome, timestamp, request correlation ID, and reason class.
+
+See [Analytics & Usage](/developers/analytics/) and
+[Reliability](/developers/reliability/).

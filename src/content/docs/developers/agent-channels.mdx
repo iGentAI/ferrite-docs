@@ -1,0 +1,267 @@
+---
+title: "Agent Channels"
+shortTitle: "Channels"
+description: "Connect GitHub comments, Slack mentions, scheduled jobs, or any signed webhook to your agent by verifying the request, naming the conversation, dispatching a signal, and replying through a bound tool."
+section: "AI & agents"
+order: 6
+---
+
+Your product's agent is part of your product, which means it often reacts to
+events outside a chat window: a GitHub comment, a Slack mention, a signed
+webhook, or a recurring schedule. A channel routes those provider events into
+your app's durable agent conversations without a separate worker service or
+hidden adapter layer. When a webhook arrives, your route verifies its
+signature, derives a conversation id from the provider's identifiers, and
+dispatches the payload as a **signal** that the agent reads like any other
+message. The agent answers through a narrow tool bound to that single
+destination over your app's declared egress.
+
+The SDK leaves provider wiring in plain Rust code inside your route handler.
+Each channel follows the same three steps (verify, name the conversation,
+dispatch), so adding a provider means copying one of the handlers below and
+changing those three parts.
+
+## Mount a route beside the faces
+
+`AgentApp::route` mounts a custom handler at a path prefix. Custom routes match
+before the protocol faces and bypass the `agents-client-token` check, because a
+channel authenticates incoming requests with the provider's own signature.
+
+```rust
+use crate::agent_sdk::app::{self, AgentApp};
+use crate::samples::channels::{github, slack};
+
+AgentApp::new(ctx)
+    .agents(registry())
+    .route("/channels/github", github::channel(app::secret("github-webhook-secret")))
+    .route("/channels/slack", slack::channel(app::secret("slack-signing-secret")))
+    .serve()
+    .await
+```
+
+Publish the route prefix in `ferrite.json` on the `requests` binding, forward
+every header the signature check reads, and declare an egress grant for the
+provider's API host so the reply tool can call back:
+
+```json
+{ "prefix": "/channels/", "binding": "requests", "kind": "api",
+  "forward_headers": ["x-hub-signature-256", "x-github-event", "x-github-delivery", "x-slack-signature", "x-slack-request-timestamp"] }
+```
+
+A custom route cannot shadow a face prefix (`/api`, `/mcp`, `/acp`, `/a2a`, or
+`/.well-known`). The application refuses to start if one does.
+
+## Verify, name, dispatch
+
+A channel handler receives the transport-free request and the runtime.
+`ferrite add agent-sdk` installs the SDK without the reference channel samples,
+so copy this GitHub handler directly into your application as a starting point:
+
+```rust
+pub fn channel(webhook_secret: SecretResolver) -> RouteHandler {
+    Arc::new(move |request, runtime| {
+        let webhook_secret = webhook_secret.clone();
+        Box::pin(async move {
+            // POST only (anything else is 404); a missing or blank secret is 503.
+            let secret = require_post_secret(&request, &webhook_secret, "github-webhook-secret")?;
+            // 1. Verify the provider's signature over the raw body.
+            verify_github_signature(&secret, request.header_value("x-hub-signature-256"), &request.body)?;
+            let delivery_id = request.header_value("x-github-delivery").unwrap_or("").to_string();
+            if delivery_id.is_empty() || delivery_id.len() > 128 {
+                return Err(SdkError::invalid_request("a GitHub delivery needs an x-github-delivery id"));
+            }
+            let event = request.header_value("x-github-event").unwrap_or("").to_string();
+            let payload = request.json()?;
+            if payload["action"] != "created" || !matches!(event.as_str(), "issue_comment" | "pull_request_review_comment") {
+                return Ok(FaceResponse::empty(204));
+            }
+            // A bot's comment (the agent's own reply included) never starts a turn.
+            if payload["sender"]["type"] == "Bot" || payload["comment"]["user"]["type"] == "Bot" {
+                return Ok(FaceResponse::empty(204));
+            }
+            // The signature covers only the body, so the body is the idempotency
+            // key: a replay under a fresh delivery header is the same submission.
+            let submission_id = format!("gh:{}", crate::crypto::hex_encode(&crate::crypto::sha256::sha256(&request.body)));
+
+            // 2. Name the conversation from the provider's identifiers.
+            let id = instance_id(&owner, &repo, number);           // github:v1:<owner>:<repo>:<issue>
+            let initial_data = serde_json::json!({ "owner": owner, "repo": repo, "issueNumber": number, "openedBy": …, "title": … });
+            let message = DeliveredMessage::Signal {
+                signal_type: format!("github.{event}.created"),
+                body: payload["comment"]["body"].as_str().unwrap_or("").to_string(),
+                attributes,                                         // deliveryId, sender, commentId
+                tag_name: None,
+            };
+
+            // 3. Dispatch: create the instance with its initial data on first
+            //    contact, continue it afterwards, in a spawned task that waits
+            //    out a busy instance.
+            spawn_signal_dispatch(runtime, AGENT, &id, initial_data, message, &submission_id);
+            Ok(FaceResponse::json(202, &serde_json::json!({ "instance": id, "deliveryId": delivery_id })))
+        })
+    })
+}
+```
+
+Requests without an `x-github-delivery` header, or with one longer than 128
+bytes, fail with `400`. Events other than `issue_comment` and
+`pull_request_review_comment`, actions other than `created`, and comments from
+a `Bot` sender or author return `204` so the agent's own replies cannot start a
+new turn.
+
+`AgentRuntime::dispatch` records `initial_data` once when creating the instance
+and ignores it on later deliveries. Because webhook providers expect a quick
+acknowledgement, the handler replies `202` immediately and runs `dispatch` in a
+background task through `spawn_signal_dispatch`. If the instance's previous
+turn is still running, `dispatch` returns `session_busy`. The spawned task
+retries with exponential backoff (starting at one second and doubling up to 30
+seconds) for up to 15 minutes and reuses the same `submission_id` on every try
+so retries converge on one submission. Any other error, or waiting past 15
+minutes, writes to `stderr` and stops trying.
+
+Because `202` is returned before `dispatch` persists the submission, two
+durability boundaries apply:
+
+- If the process terminates after sending `202` and before `dispatch` records
+  the submission, the delivery is lost. The provider saw success and will not
+  retry automatically, so redeliver it from the provider's delivery log.
+- Once the submission is recorded, a crash mid-turn resumes on the next start,
+  and a redelivery with the same raw body (including one sent from GitHub's
+  delivery log) converges on the existing submission.
+
+The SDK has no call that persists a submission without running it. If your
+channel must not lose a delivery in that window, await `dispatch` before
+replying and return errors as non-2xx statuses. Provider retry rules differ:
+Slack retries failed deliveries a few times, while GitHub never retries
+automatically and requires redelivery from its delivery log or API. Awaiting
+fits only turns that finish inside the provider's webhook timeout (ten seconds
+for GitHub). Whenever you spawn `dispatch`, log or count failures so dropped
+deliveries remain visible.
+
+Signature checks run over the raw request body bytes using
+`ferrite_app::crypto::hmac_sha256` from the SDK alongside `constant_time_eq`
+and `hex_encode` from the vendored `sha256-hmac` package (mounted at
+`crate::crypto`). Slack also signs the request timestamp, and its handler
+refuses requests older than five minutes.
+
+## Read the delivery in the agent
+
+The agent reads its thread context from `initial_data` and the incoming event
+from the signal. Because your channel verified the webhook and constructed both
+the instance id and `initial_data`, those fields come from trusted code and the
+model never chooses them.
+
+```rust
+#[derive(Debug, Clone, Deserialize)]
+#[serde(crate = "ferrite_app::serde")]
+pub struct IssueRef { pub owner: String, pub repo: String, #[serde(rename = "issueNumber")] pub issue_number: u64, #[serde(rename = "openedBy")] pub opened_by: String, pub title: String }
+
+pub fn assistant() -> Instruction {
+    use_model("anthropic/claude-haiku-4-5");
+    let Some(issue) = use_initial_data::<IssueRef>() else {
+        return "This agent is created by the GitHub channel; without an issue binding it can only explain that.".into();
+    };
+    if let Some(http) = app::http() {
+        use_tool(comment_on_issue(http, app::secret("github-token"), issue.clone()));
+    }
+    format!("Review the issue and post a concise triage comment when appropriate. \"{}\" was opened by {}.", issue.title, issue.opened_by).into()
+}
+```
+
+The conversation shows the delivery as
+`<signal type="github.issue_comment.created" commentId="…" deliveryId="…" sender="…">`
+with the comment text as its body. Call `use_delivery()` inside the agent
+function when you need signal attributes at render time.
+
+## Reply through a narrow tool
+
+Bind the reply destination when you mount the tool so the model supplies only
+the comment text:
+
+```rust
+pub fn comment_on_issue(http: Arc<dyn HttpTransport>, token: SecretResolver, issue: IssueRef) -> Tool {
+    define_tool("comment_on_github_issue", "Post a comment to the GitHub issue or pull request bound to this agent.")
+        .input(ObjectSchema::new().required("body", string("The comment body")).build())
+        .run(move |ctx: ToolContext| {
+            let (http, token, issue) = (Arc::clone(&http), token.clone(), issue.clone());
+            async move {
+                let token = token().ok_or_else(|| ToolError::new("the github-token secret is not configured"))?;
+                let url = format!("https://api.github.com/repos/{}/{}/issues/{}/comments", issue.owner, issue.repo, issue.issue_number);
+                let payload = ferrite_app::serde_json::to_vec(&serde_json::json!({ "body": ctx.data["body"] })).map_err(|e| ToolError::new(e.to_string()))?;
+                let (status, reply) = http.post(&url, &payload, &headers(&token)).await.map_err(ToolError::new)?;
+                …
+            }
+        })
+}
+```
+
+The tool is mounted only when egress is granted (`app::http()` returns `None`
+otherwise), and the provider token is read from the sealed `github-token`
+secret at call time.
+
+Treat every delivered body as untrusted input. Anyone who can comment on the
+repository or mention the app in Slack controls text that enters the model's
+prompt, and that text can try to steer the model. Binding the destination
+inside the reply tool contains the blast radius: no matter what the incoming
+comment asks, the model can post text only to the single issue or thread the
+channel bound. Do not mount general write tools such as `github_api` or
+`github_create_issue` on an agent fed by a channel; give it read-only GitHub
+tools plus the bound reply tool.
+
+Make sure the provider's API host sits under an egress handle the SDK actually
+opens: `web-egress`, `github-egress`, or `mcp-egress` by default, or any handle
+name added to `AppConfig.egress`. A manifest grant under an unregistered handle
+name such as `slack-egress` is never opened, so the reply tool fails with an
+egress denial. Either add the provider host to an existing handle or register
+the new handle name in `AppConfig.egress`.
+
+## The Slack channel
+
+Slack Events API channels (`samples/channels/slack.rs`) follow the same three
+steps: the handler answers Slack's `url_verification` handshake,
+verifies `v0:<timestamp>:<body>` under `slack-signing-secret`, names each
+conversation `slack:v1:<team>:<channel>:<thread_ts>`, dispatches `app_mention`
+events as `slack.app_mention` signals keyed by `event_id`, and replies with
+`reply_in_slack_thread` through `chat.postMessage`.
+
+## Other providers
+
+Most webhook providers follow the same structure and differ only in their
+signature scheme, conversation identifiers, and reply endpoint. Before copying
+a handler, confirm your application can verify the provider's signatures.
+`ferrite_app::crypto` provides HMAC-SHA256, SHA-256, constant-time comparison,
+and JWT verification for `HS256`, `RS256`, `ES256`, and `EdDSA`, and an
+application cannot link another cryptography crate.
+
+- A provider that signs webhooks with HMAC-SHA1 cannot be verified with these
+  primitives.
+- A provider that signs deliveries with a JWT requires fetching the issuer's
+  public keys over an egress destination declared in `ferrite.json`.
+
+Once signature verification fits, copy the GitHub handler above, replace the
+verification logic, conversation key, and reply endpoint, and mount it at
+`/channels/<provider>`.
+
+## Schedules are channels too
+
+A scheduler is a provider whose event is the passage of time. The scheduled
+sample (`samples/schedules.rs`) dispatches a `schedule` signal into a fixed
+`daily-summary` instance with the fire time as its idempotency key.
+
+Ferrite has no platform cron that invokes an application's HTTP route, so a
+scheduled fire comes from one of two sources:
+
+- an external scheduler sending
+  `POST /api/agents/scheduled/instances/daily-summary/messages` with
+  `agents-client-token` and the fire time as `submissionId`; or
+- code inside your application calling `fire` when a delayed queue message
+  comes due (see [Cron Jobs](/developers/cron-jobs/) for delayed queue
+  scheduling).
+
+Because both paths use the fire time as the idempotency key, a retried fire
+converges on one run. Keep a fixed instance id (`daily-summary`) to continue
+one conversation across runs, or include the date in the id (`daily-<date>`) to
+start a fresh conversation with bounded context each time.
+
+Continue with [Agent Samples](/developers/agent-samples/) for the full
+pattern catalog.

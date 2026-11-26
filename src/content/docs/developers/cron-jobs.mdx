@@ -1,0 +1,83 @@
+---
+title: "Cron Jobs"
+description: "Schedule one-time and recurring work with delayed queue messages that stay durable in the queue until their due time."
+section: "Build"
+order: 3
+---
+
+Ferrite manifests have no cron setting. Schedule future work by publishing a
+queue message with `publish_at`, which holds the message invisible until a given
+timestamp. Because the queue persists the message immediately on publish,
+restarts and worker crashes never lose a due job, and no process has to stay
+alive holding an in-memory timer.
+
+## Schedule delayed work
+
+Use `publish_at` for reminders, hold expirations, retry backoff, and one-time
+future actions. Write the domain record first, then publish a job that names it.
+Because `publish_at` takes no separate key parameter, store the job's identity
+in its payload (the booking ID and scheduled timestamp below). When the message
+becomes visible, re-read the domain record and apply the effect only if the
+record still requires it.
+
+```rust filename="src/booking.rs"
+let job = ReminderJob { booking_id, scheduled_for_ms };
+reminders
+    .publish_at(&serde_json::to_vec(&job)?, scheduled_for_ms)
+    .await?;
+```
+
+Polling stored state is an alternative for short, coarse intervals. The
+`ferrite-booking` example expires slot holds and marks reminders ready in loops
+that scan state every second and every 30 seconds. Restarts lose no due work
+under either approach, though polling runs even when nothing is due and stops
+while the application is stopped. In both designs, stored state decides the
+outcome, so a late or repeated pass cannot resurrect a cancelled booking.
+
+## Recurring schedules
+
+Model a recurring job as a chain of delayed messages where each run schedules
+the next one. Store the schedule's next due time in durable state and embed each
+occurrence's due time in its payload. Updating durable state and publishing the
+next queue message are two separate writes, so a crash between them can either
+stop the chain or publish the next occurrence twice.
+
+Design for both crash windows: apply an occurrence's effect and advance the
+stored next due time in one atomic write only when the message's due time still
+matches the stored next occurrence, then publish the job for the new due time,
+and acknowledge the current message only after `publish_at` returns. If a crash
+causes redelivery after the write, the retry republishes the next job without
+reapplying the effect, and any resulting duplicate does nothing because its due
+time has already run.
+[Schedule work with delayed publish](/kb/guide/delayed-publish-as-cron/) walks
+through each failure mode and how to restart a chain that stopped.
+
+## Limits
+
+Delayed publish carries these platform bounds:
+
+- Publish delayed jobs to an ordinary queue; frames (stream) queues refuse
+  `publish_at`.
+- Due times are epoch milliseconds, so your code handles calendar math and time
+  zones.
+- The due time is the earliest time a job can be delivered. Execution happens
+  when a worker leases the message, so a stopped or busy worker runs it late.
+- Delayed messages cannot be withdrawn once published. To cancel a scheduled
+  job, update the domain record so the handler finds nothing to do.
+
+When your account balance reaches zero, your applications stop, and any job that
+falls due while stopped waits in the queue until they run again.
+
+## Failure behavior
+
+- Unacknowledged jobs return to the queue once their lease expires.
+- Jobs that exhaust their attempt budget move to a dead-letter queue.
+- Delivery is at least once. Record each job's identity in the same atomic write
+  as its effect so retries skip completed work.
+  [Apply queue effects once with APE](/kb/guide/exactly-once-effects-with-ape/)
+  shows this pattern using APE (atomic envelope), the service behind
+  [Transactions](/developers/transactions/).
+- Re-checking current domain state turns stale reminders into safe no-ops.
+
+Next: read [Queues](/developers/queues/) for leases and dead-letter queues, or
+[Workflows](/developers/workflows/) for multi-step orchestration.

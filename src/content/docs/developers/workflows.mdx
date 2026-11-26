@@ -1,0 +1,69 @@
+---
+title: "Workflows"
+description: "Compose long-running, retry-safe multi-step workflows from Ferrite queues, stored state, transactions, and streams."
+section: "Build"
+order: 4
+---
+
+Ferrite has no workflow engine that an application can call. Compose multi-step
+workflows from the durable primitives already in `ferrite.json`: keep instance
+state in stored records, represent each runnable step as a message on a private
+queue, and use a transaction whenever a state change and its next step must
+commit together. No process has to stay alive for the lifetime of the workflow,
+each transition commits before the next step runs, and a crashed step redelivers
+and retries.
+
+## Model a workflow
+
+Keep the workflow instance and its outbox in the same
+[Transactions](/developers/transactions/) binding so one atomic commit records
+both the transition and the next step. Because a transaction covers keys within
+one binding only, publishing the next step onto its queue is a separate write.
+Publish from the outbox after the commit succeeds, acknowledge the current step
+only after that publish returns, and let the next step's idempotency absorb the
+duplicate that a crash between publish and acknowledgement produces. If you need
+a readable history, append an event to a stream for each accepted transition.
+
+```text
+checkout.received
+  → inventory.reserved
+  → payment.pending
+  → payment.completed
+  → fulfillment.requested
+```
+
+Workers treat stored state as authoritative. A duplicate payment webhook or a
+redelivered queue lease observes that the transition already committed and
+returns the prior result.
+
+## Ferrite's own workflow service
+
+`ferrite-workflows` is an internal workflow engine with definitions, timers, and
+callback waits that is not distributed to applications. You cannot add it with
+`ferrite add`, and because each deploy carries one application, your code cannot
+call it as a dependency. Build application workflows with the queue and
+transaction pattern above.
+
+The [commerce fulfillment and secure release rollout samples](/developers/samples/)
+include reference workflow definitions describing event waits, approval steps,
+and retried outbound calls. Their deployed routes execute only the first
+admission step, so read those definitions as a design reference rather than code
+that runs automatically.
+
+## Design rules
+
+- Give every external event a stable idempotency key.
+- Persist intent before publishing follow-up work.
+- Make each step safe to retry independently.
+- Watch the dead-letter count returned by the queue's `counts` call; a step that
+  keeps failing exhausts its attempt budget and moves to the dead-letter queue
+  ([Queues](/developers/queues/)).
+- Record an explicit reason on terminal failure instead of leaving an instance
+  stuck in an intermediate state.
+
+When your account balance reaches zero, your applications stop and workflow
+instances pause until they run again.
+
+Next: commit atomic transitions in [Transactions](/developers/transactions/),
+verify provider events in [Webhooks](/developers/webhooks/), or review fault
+tolerance in [Reliability](/developers/reliability/).

@@ -1,0 +1,185 @@
+---
+title: "Build for agents"
+description: "Expose your application to your users' assistants with the agent-ready package, under the same authorization rules as your web interface, and verify each served endpoint."
+section: "Assistants & MCP"
+order: 0
+---
+
+When your users' assistants interact with your app, scraping HTML breaks easily and hand-maintaining separate API, Markdown, and MCP surfaces quickly drifts out of sync. The `agent-ready` source package solves this by generating `llms.txt`, Markdown page twins, an OpenAPI description, an MCP endpoint, and supporting discovery files from one `Surface` declaration. Because every generated file mirrors that declaration without inspecting your handler code, verify each served endpoint against live responses before shipping.
+
+This guide covers the assistants your users bring to your product. For the coding agent that builds and deploys your app, see [Agent setup](/developers/plugin/). For an agent that runs inside your product, see [Agents](/developers/agents/).
+
+## Add the package
+
+Install `agent-ready` from the Ferrite package registry. If you have not signed in to Ferrite on this machine yet, pass `--registry` explicitly:
+
+```bash
+ferrite add agent-ready --registry https://packages.ferrite.cloud/registry.json
+```
+
+If you are already signed in, `ferrite add agent-ready` resolves the registry from your active endpoint.
+
+`ferrite add` prints the `pub mod` declarations you need in `src/lib.rs` for `agent_ready` and its dependencies (`crypto`, `http_change_password`, `http_query`). Add those lines to `src/lib.rs` so the vendored modules compile.
+
+## Wire it into a `webapp` app
+
+Continue from the [Quickstart](/developers/quickstart/) template (`ferrite new webapp <name> --with-tests`). Three edits make the app answer agent requests.
+
+First, route the agent-facing paths to your application handler instead of the static content route. In `ferrite.json`, add these entries to `routes`, above the `/` content route:
+
+```json
+{ "prefix": "/llms.txt", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/llms-full.txt", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/robots.txt", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/sitemap.xml", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/openapi.json", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/.well-known/", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/mcp", "binding": "requests", "kind": "api", "public": true },
+{ "prefix": "/index.md", "binding": "requests", "kind": "api", "public": true },
+```
+
+Second, append the `Surface` declaration, `PageSource` implementation, and `agent_reply` helper to `src/lib.rs`. Declaring `get_count` here publishes it simultaneously as an OpenAPI operation, an MCP tool, and an agent-card skill:
+
+```rust filename="src/lib.rs"
+use agent_ready::mcp_face::ToolOutcome;
+use agent_ready::surface::{Operation, Page, Route, RouteKind, Surface};
+use agent_ready::well_known::{self, PageSource};
+
+/// The one declaration every agent-facing file is generated from.
+pub fn surface() -> Surface {
+    Surface {
+        name: "bfa".into(),
+        owner: "you".into(),
+        origin: "http://127.0.0.1:8787".into(),
+        description: "A live counter.".into(),
+        version: "1.0.0".into(),
+        routes: vec![Route {
+            prefix: "/api/".into(),
+            kind: RouteKind::Api,
+            description: "Counter API".into(),
+            operations: vec![Operation {
+                name: "get_count".into(),
+                method: "GET".into(),
+                path: "/api/count".into(),
+                description: "Read the current count.".into(),
+                input_schema: Some(serde_json::json!({ "type": "object", "additionalProperties": false })),
+                output_schema: None,
+                read_only: true,
+                idempotent: true,
+                price_micros: 0,
+            }],
+        }],
+        pages: vec![Page {
+            path: "/".into(),
+            title: "Counter".into(),
+            summary: "The live counter page.".into(),
+            updated_ms: 0,
+            core: true,
+        }],
+    }
+}
+
+/// Where the Markdown twin of each declared page comes from.
+pub struct Pages;
+impl PageSource for Pages {
+    fn markdown(&self, path: &str) -> Option<String> {
+        (path == "/" || path == "/index.md").then(|| "# Counter\n\nA live counter.\n".to_string())
+    }
+    fn html(&self, _path: &str) -> Option<String> {
+        None
+    }
+}
+
+/// Answer an agent-facing path, or `None` when the request belongs to the app.
+/// Call it first in the request handler. Only an MCP call of `get_count` reads
+/// the counter; discovery, `initialize` and `tools/list` never touch storage.
+pub async fn agent_reply(
+    state: &mut ferrite_app::client::ApeClusterClient,
+    req: &IngressRequest,
+) -> Option<IngressReply> {
+    let calls_get_count = req.method == "POST"
+        && req.path.split('?').next() == Some("/mcp")
+        && serde_json::from_slice::<serde_json::Value>(&req.body).is_ok_and(|v| {
+            v["method"] == "tools/call" && v["params"]["name"] == "get_count"
+        });
+    let count: Option<Result<i64, String>> = if calls_get_count {
+        Some(read_counter(state).await.map(|(c, _)| c.count).map_err(|e| e.to_string()))
+    } else {
+        None
+    };
+    let exec = move |name: String, _args: serde_json::Value| {
+        let count = count.clone();
+        async move {
+            match (name.as_str(), count) {
+                ("get_count", Some(Ok(n))) => ToolOutcome::ok(serde_json::json!({ "count": n })),
+                ("get_count", Some(Err(e))) => {
+                    ToolOutcome::err(serde_json::json!({ "error": format!("count unavailable: {e}") }))
+                }
+                _ => ToolOutcome::err(serde_json::json!({ "error": "unknown tool" })),
+            }
+        }
+    };
+    let headers: Vec<(String, String)> = req.headers.clone();
+    let (status, content_type, body, extra) =
+        well_known::handle_h(&surface(), &req.method, &req.path, &headers, &req.body, &Pages, exec).await?;
+    let mut out = vec![("content-type".to_string(), content_type.to_string())];
+    out.extend(extra.into_iter().map(|(name, value)| (name.to_string(), value)));
+    serde_json::from_value(serde_json::json!({
+        "correlation_id": req.correlation_id, "status": status, "headers": out, "body": body,
+    }))
+    .ok()
+}
+```
+
+Third, call `agent_reply` at the top of the scaffold's `handle_api`, before its own `match`:
+
+```rust filename="src/lib.rs"
+    if let Some(answer) = agent_reply(state, req).await {
+        return answer;
+    }
+```
+
+Run `ferrite check --json` and `ferrite test` to verify that the app builds and passes its tests. Replace `name`, `origin`, and `operations` with your application's values, and set `origin` to the URL your app is served from.
+
+## What it serves
+
+| Path | Consumer |
+| --- | --- |
+| `/robots.txt`, `/sitemap.xml` | Crawlers and answer engines |
+| `/llms.txt`, `/llms-full.txt` | Agents loading site context into a prompt |
+| `/index.md` | Agents fetching the Markdown twin of `/`. Because `/` remains a static content route in this example, `Accept: text/markdown` on `/` returns HTML; route `/` to the app and forward `accept` if you want content negotiation there |
+| `/openapi.json`, `/.well-known/api-catalog` | Agents generating tools from an OpenAPI description |
+| `POST /mcp` | MCP clients |
+| `/.well-known/agent-card.json` | Agent-to-agent orchestrators |
+| `/.well-known/agent-readiness` | Developers and CI checks inspecting what the app declares |
+| Problem JSON on errors | Agent loops that branch on structured failure codes |
+
+The `/.well-known/` route above also serves `/.well-known/mcp/server-card.json` and the `/.well-known/agent-skills/` index and skill files. The handler supports `/server.json` (the MCP registry manifest), `/pricing.md`, and `POST /a2a` (a stateless A2A endpoint) as well. Those three paths are not published by the route list above; add matching routes on the `requests` binding in `ferrite.json` when you want to expose them.
+
+The MCP endpoint speaks protocol revision `2026-07-28` and still answers the `2025-11-25` wire format. Requests whose `params` omit a `_meta` protocol version are handled as `2025-11-25`, which lets the `curl` call below run without extra version metadata.
+
+## Same authorization as the interface
+
+`agent-ready` does not make authorization decisions. Your handler enforces access control inside the closure you pass to `handle_h`. Public catalogue operations may answer anonymous callers, while any operation touching user data must apply the same subject, ownership, and step-up checks as the web route that performs the same action.
+
+A server-side MCP request never carries a browser session cookie, and WebMCP must never copy that cookie into an assistant's context. See [Authorization](/developers/authorization/#assistants-acting-for-a-person) for the authorization rules when an assistant acts for a person.
+
+## Limits
+
+`agent-ready` emits files straight from your `Surface` declaration and cannot confirm that your runtime handlers match what you declared. As your application changes, you are responsible for keeping three places in sync: the routes in `ferrite.json`, the `Surface` struct, and the `agent_reply` call at the top of `handle_api`. For supported protocol revisions and everything the package leaves to your application, see [What the package does not do](/developers/agent-native-apps/#what-the-package-does-not-do).
+
+## Verify what is served, not what is declared
+
+Start the local dev server and call each published face directly:
+
+```bash
+ferrite dev
+curl -s http://127.0.0.1:8787/llms.txt
+curl -s http://127.0.0.1:8787/.well-known/agent-readiness
+curl -s -X POST http://127.0.0.1:8787/mcp -H 'content-type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_count","arguments":{}}}'
+```
+
+`/.well-known/agent-readiness` only echoes your `Surface` declaration; it does not test your handlers. Exercise every interface you advertise, including an MCP `tools/list`, a real `tools/call`, and an OpenAPI route, and inspect the live responses.
+
+Continue with [Agent-ready apps](/developers/agent-native-apps/), [MCP Servers](/developers/mcp-servers/), and [WebMCP & OpenAPI](/developers/webmcp-openapi/).

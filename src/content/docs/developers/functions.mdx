@@ -1,0 +1,123 @@
+---
+title: "Functions"
+description: "Run your application code as a supervised process with only the storage, queues, routes, outbound destinations, and secrets declared for it."
+section: "Build"
+order: 1
+---
+
+Your Ferrite application runs as a supervised OS process compiled from Rust
+source, whether you write it directly against `ferrite-app`, build with
+[Alloy](/developers/alloy/) or [Rsx](/developers/rsx/), or compile from a
+[TanStack Start](/developers/tanstack-start/) build. At startup, the runtime
+hands the process only the named handles declared in `ferrite.json`. There are
+no ambient database credentials and no cloud SDK clients on the host, and the
+source check rejects code that opens sockets, reads the filesystem, or reads
+environment variables.
+
+Two explicit boundaries govern access outside the application. Secrets are
+write-only in the control plane and delivered to your running process through
+`ctx.secret(name)`. Outbound HTTP passes exclusively through an `egress` handle
+limited to the hostnames listed in `ferrite.json`
+([Secrets & Egress](/developers/secrets-egress/)).
+
+## Create a function
+
+```bash
+ferrite new hello receipts-api
+cd receipts-api
+ferrite dev
+```
+
+Every application implements `FerriteApp` and requests its declared handles from
+`AppContext`:
+
+```rust filename="src/main.rs"
+#![forbid(unsafe_code)]
+
+use std::io;
+use ferrite_app::{app_main, AppContext, FerriteApp};
+
+struct Receipts;
+
+impl FerriteApp for Receipts {
+    async fn run(ctx: AppContext) -> io::Result<()> {
+        let mut requests = ctx.queue("requests")?;
+        loop {
+            let Some(lease) = requests.poll_wait(1_000).await? else { continue };
+            // Decode the IngressRequest, authorize, and apply the domain logic.
+            // For an api route, publish the reply on req.reply_to first, then acknowledge.
+            requests.ack(lease.token).await?;
+        }
+    }
+}
+
+fn main() { app_main::<Receipts>() }
+```
+
+When `requests` backs an `api` route, each leased message is an `IngressRequest`
+whose caller is waiting on the queue named by `reply_to`. Publish the reply
+before acknowledging the lease so a crash between those two calls redelivers the
+request instead of dropping the answer. The `hello` template created by
+`ferrite new hello` pairs that order with an idempotency marker so a redelivered
+request returns the original response. To build an application that renders web
+pages, start with `ferrite new alloy`.
+
+## Lifecycle and scale
+
+Each function instance is a long-running OS process that pulls work continuously
+from its queues. Because instances stay alive whether traffic arrives or not,
+Ferrite Cloud meters the memory and CPU reserved for an instance for as long as
+it runs. Check projected spend before deploying with `ferrite cost`;
+[Understand usage and credits](/kb/guide/usage-and-credits/) explains balances
+and metering.
+
+Ferrite supervises every process and restarts it when it exits. Exceeding your
+memory limit terminates the process in the kernel, and exceeding your CPU share
+throttles execution. On an `api` route, your code must answer within the ingress
+deadline (8 seconds on the recommended configuration; see
+[Limits](/developers/limits/)). Past that deadline, the gateway returns `504`
+even if your worker still finishes, so move longer work onto a queue and return
+an operation identifier immediately.
+
+Scaling adds competing instances that share the same queues and stores. Exercise
+multi-instance concurrency locally:
+
+```bash
+ferrite dev --instances 3
+```
+
+After deploying, scale from the Dashboard or call the Ferrite MCP `scale` tool
+with the application name and target instance count. Verify active counts with
+`ferrite status receipts-api`. You can also set the count at deploy time with
+`ferrite deploy --instances N`, or declare `instances` or an `autoscale` policy
+in `ferrite.json` ([App Manifest](/developers/app-manifest/)). Trial accounts
+run one instance per deployed application and refuse scaling above one.
+
+Any effect can replay after a crash, so acknowledge a lease only after committing
+its effect and make every handler idempotent. Run `ferrite dev --chaos 5` locally
+to send `SIGKILL` to your app roughly every five seconds, force lease redelivery,
+and verify that retried effects never apply twice.
+
+## Where an instance runs
+
+Applications share the host kernel. Ferrite runs each application instance under
+its own unprivileged user inside private kernel namespaces, with no network route
+of its own, behind a system-call filter and hard memory and CPU limits.
+[What bounds your app](/developers/why-it-is-safe/) details each layer, what
+remains shared, and what none of those controls stop.
+
+## Compute limits
+
+Declare per-instance resources under the application's `compute` key in
+`ferrite.json`, for example `"compute": { "memory_mb": 256, "cpu_percent": 50 }`.
+Admission rejects configurations that violate platform bounds or budget rules
+before the application starts. Trial accounts cap compute at 256 MiB of memory
+and 50% of a core per instance regardless of what the manifest declares.
+
+A function holds no durable state of its own between runs. Store, Transactions,
+Queues, Streams, and Object Storage keep their data across crashes, restarts,
+and redeploys.
+
+Next: map public endpoints in [Routing](/developers/routing/), handle background
+work in [Queues](/developers/queues/), or ship a release in
+[Deployments](/developers/deployments/).

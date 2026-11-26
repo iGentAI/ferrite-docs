@@ -1,0 +1,195 @@
+---
+title: "Alloy Routing"
+shortTitle: "Routing"
+description: "Route patterns, specificity, render modes, declarative redirects, per-route response headers, method handling, and typed hrefs in Ferrite Alloy."
+section: "Alloy"
+order: 3
+---
+
+Alloy routes work in two layouts. A Rust-only app builds a `RouteTable` by hand
+with `Route::page`, as the `alloy` template does. An app with a React front end
+declares each route once under `app/` with `alloy::route!`, and `ferrite dev`
+generates both `generated::route_table()` in Rust and the TypeScript route
+table from that single declaration so both halves stay in sync. The pattern
+grammar, specificity ranking, and render modes below apply to both.
+
+## Patterns
+
+Alloy uses the Next.js App Router pattern syntax:
+
+| Pattern | Meaning | Parameter |
+|---|---|---|
+| `/drops` | a literal segment | none |
+| `/drops/[id]` | one dynamic segment | `id` (one value) |
+| `/docs/[...slug]` | one or more segments | `slug` (one or more values) |
+| `/shop/[[...path]]` | zero or more segments | `path` (zero or more values) |
+| `/(marketing)/about` | a route group: organizes files, never appears in URLs | none |
+
+Route groups organize source files and never appear in a matched URL. Required
+catch-alls require at least one segment, so `/docs/[...slug]` does not match
+`/docs`.
+
+## Specificity
+
+Overlapping routes rank deterministically from left to right, segment by
+segment: a static segment beats a parameter, and a longer literal prefix wins.
+Declaration order has no effect, so adding a new route cannot re-rank an
+existing match without warning.
+
+## Render modes
+
+Set the mode with the `render` field in `alloy::route!`, or with
+`Route::with_render(RenderMode::Hybrid)` on a hand-built table:
+
+```rust
+alloy::route! {
+    id: home,
+    path: "/",
+    loader: get_feed,
+    output: FeedView,
+    render: Hybrid,
+}
+```
+
+The mode states what the HTML document is meant to carry and propagates into
+the generated TypeScript route table. Alloy runs no JavaScript on the server
+and does not prerender React; in every mode, the document body comes from what
+your Rust code writes into the shell, with metadata and the loader payload
+substituted (see [Documents & Assets](/developers/alloy-documents/)).
+
+| Mode | What the document carries | Use for |
+|---|---|---|
+| `Static` | complete HTML written by your Rust half or build step that needs no JavaScript | content pages and documents crawlers must read |
+| `Hybrid` | the shell with the loader payload embedded, hydrated by the front end | default for interactive app pages |
+| `Spa` | the shell only; the browser renders the entire page | tool screens and signed-in interiors |
+
+Only `Static` changes runtime caching behavior. A `Static` route that also sets
+a cache life (`Route::with_cache_life`, which `alloy::route!` has no field for)
+can be cached by shared caches when the app sets `PUBLIC_STATIC = true`. Every
+other document defaults to `private, no-cache` unless the route declares its
+own `cache-control` header. See
+[Public caching for Static routes](/developers/alloy-documents/#public-caching-for-static-routes)
+for all three required conditions. The generator accepts only `Static`,
+`Hybrid`, or `Spa` and rejects any other value.
+
+## Redirects
+
+Declare redirects so the runtime and the client router share one table:
+
+```rust filename="app/redirects.rs"
+alloy::redirect! { from: "/old-path", to: "/new-path", permanent: true }
+alloy::redirect! { from: "/drops/[id]/info", to: "/drops/[id]" }
+```
+
+- `permanent` is optional and defaults to `false` (HTTP `307`). Set
+  `permanent: true` to emit HTTP `308`, which browsers cache aggressively.
+- `from` uses the route pattern grammar and `to` can substitute parameters
+  captured by `from`. Referencing an uncaptured parameter in `to` fails
+  generation.
+- Substituted parameter values are re-percent-encoded per segment, so a request
+  for `/old/a%2F..%2Fadmin` cannot expand into a path traversal in the
+  `Location` header.
+
+Alloy evaluates redirects **before** route matching and takes **one hop**.
+Because the runtime does not chain redirects, the generator rejects any
+redirect whose target matches another redirect's source. `RouteTable::resolve`
+returns `Resolution::Redirect { location, permanent }`, which the runtime
+renders as a `Location` header.
+
+The generated TypeScript exports the same array
+(`export const redirects: { from: string; to: string; permanent: boolean }[]`)
+for your client router and verification checks.
+
+## Per-route response headers
+
+A route can declare response headers to send on both the HTML document and the
+loader JSON payload used for client navigations:
+
+```rust
+alloy::route! {
+    id: embed,
+    path: "/embed/[id]",
+    params: { id: String },
+    loader: get_embed,
+    output: EmbedView,
+    headers: { "x-frame-options": "DENY", "referrer-policy": "same-origin" },
+}
+```
+
+The request loop does not attach these headers automatically. They are applied
+by the two reply helpers that take the resolved route:
+`alloy::app::document_for::<App>(req, &route, &params, data, &metadata, nonce)`
+(and `document_for_status`) for HTML documents, and
+`alloy::app::loader_reply_for::<App>(req, &route, &params, data)` for loader
+payloads. `alloy::app::document` takes no route and applies no route headers.
+If your app builds document replies manually (as the `alloy` template's
+`render` helper does), copy `route.headers()` onto the reply and replace any
+matching header name; otherwise a declared header like `x-frame-options: DENY`
+reaches loader JSON responses while missing HTML documents.
+
+Through those helpers, declared headers apply **last and replacing**: naming
+`content-security-policy` overrides the nonce-derived policy, and naming
+`cache-control` overrides the default caching policy. The generator rejects the
+framing headers `content-length` and `transfer-encoding`. Every route also
+passes through `Route::with_headers`, which strips gateway-owned headers
+(`connection`, `upgrade`, `access-control-allow-origin`, and other framing
+headers) and any header value containing CR, LF, or NUL, and logs a warning
+because the gateway drops those headers from replies. The gateway
+relays at most 16 application headers per reply and keeps only the first value
+of any repeated header name.
+
+## Route handlers and methods
+
+Page routes answer `GET`, and in `ferrite dev` or `TestHarness` they also
+answer `HEAD` with the same headers as `GET` and an empty body. Custom route
+handlers declare their accepted HTTP methods explicitly:
+
+```rust
+alloy::route! {
+    id: api_drops,
+    path: "/api/drops",
+    methods: [GET, POST],
+    render: Spa,
+}
+```
+
+Without `methods`, a declared route accepts `GET`. Three optional fields
+customize code generation: `params: { id: String }` types dynamic segments,
+`query: { ... }` lists query parameters the loader depends on (the generated
+`loaderKey` in `routes.ts` appends them in declaration order), and
+`actions: [add_note]` lists actions used by the route (each must have a
+matching `alloy::action!` declaration).
+
+When a request's path matches a route under an unsupported method, Alloy
+returns **405 with an `Allow` header** listing the declared methods plus the
+derived `OPTIONS`. On Ferrite Cloud, `api` routes forward only `GET`, `POST`,
+`PUT`, `PATCH`, and `DELETE`, so the gateway itself returns `405` for `HEAD`
+and `OPTIONS` before the request reaches Alloy (see
+[Limits](/developers/limits/)). Unmatched paths return `Resolution::NotFound`,
+rendered as an RFC 9457 problem document.
+
+## Typed hrefs: RoutePath and RouteHref
+
+In an app with a front end, the generated route table exports two types:
+
+```ts filename="web/src/generated/routes.ts"
+/** Every declared route path: a broken internal link fails `tsc`. */
+export type RoutePath = "/notes/[id]" | "/";
+
+/** Every route as a concrete href: a parameter segment becomes `${string}`. */
+export type RouteHref = `/notes/${string}` | "/";
+```
+
+`RoutePath` is the pattern union, and `RouteHref` is the template-literal union
+for concrete URLs. Typing your link component's `href` prop as `RouteHref`
+catches undeclared path prefixes during `tsc`. Because `${string}` also matches
+slashes, `/notes/a/undeclared` still type-checks. Build internal links with the
+generated `fillPath(pattern, params)` helper in `hooks.ts`, which substitutes
+and percent-encodes typed parameters into a declared pattern, and validate any
+href built outside `fillPath` at runtime.
+
+The `Link` component, client router, and prefetching used in Ferrite's own
+ported applications belong to the undistributed Next.js adapter; see
+[Next.js Adapter](/developers/alloy-next/).
+
+Next: [Data & Caching](/developers/alloy-data/).

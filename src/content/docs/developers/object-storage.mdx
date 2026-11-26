@@ -1,0 +1,132 @@
+---
+title: "Object Storage"
+description: "Store files under keys you choose, verify integrity on every read, chunk objects larger than 16 MiB, and serve public assets through content routes."
+section: "Data"
+order: 5
+---
+
+Ferrite Object Storage keeps files and other large payloads outside small Store
+records, stored under keys you choose. Every `put` returns the SHA-256 digest of
+the bytes, and every read is integrity-checked so corrupted data is refused
+instead of served. A second `put` to the same key replaces the object; store the
+returned digest in a Store record whenever you need to detect replacements.
+
+## Store an object
+
+Declare a `blob` service, bind it with `"kind": "blob"`, and pass the handle
+name to `ctx.blob`:
+
+```json filename="ferrite.json"
+{
+  "services": [{ "name": "uploads", "primitive": "blob" }],
+  "applications": [{
+    "name": "evidence",
+    "artifact_key": "apps/evidence@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "uploads", "kind": "blob", "service": "uploads" }
+    ]
+  }]
+}
+```
+
+```rust filename="src/uploads.rs"
+let mut uploads = ctx.blob("uploads")?;
+uploads.put(b"tenant/acme/evidence/report.pdf", &bytes).await?;
+let report = uploads.get(b"tenant/acme/evidence/report.pdf").await?;
+```
+
+`put` returns the digest, `get` returns the bytes or `None`, and `delete(key)`
+returns whether the key held an object. Those three methods are the full handle;
+see [Uploads, replies and listings](#uploads-replies-and-listings) for patterns
+around metadata and transfers.
+
+Always use tenant-scoped keys, because the key is the only way to address an
+object. Keep metadata, ownership, retention, and authorization state in the
+[Key-value Store](/developers/store/), and keep the file bytes in Object
+Storage.
+
+## Large objects
+
+One object holds at most 16 MiB (the blob node's default limit), and a larger
+`put` is refused. For payloads above 16 MiB, use `ferrite_app::large_object`
+over the same handle:
+
+```rust filename="src/uploads.rs"
+use ferrite_app::large_object;
+
+large_object::put(&mut uploads, key, &bytes, large_object::DEFAULT_CHUNK_BYTES).await?;
+let archive = large_object::get(&mut uploads, key).await?;
+```
+
+`large_object` also provides `delete` and a streaming `Writer` for bytes that
+arrive incrementally. It writes 8 MiB chunks beneath a manifest at your key,
+keeps the previous live object intact until a rewrite finishes, and refuses torn
+reads. The local SDK used by `ferrite check` and `ferrite dev` does not declare
+`large_object`, so code calling it compiles only in the platform build.
+
+## Uploads, replies and listings
+
+Files reach your application through `api` routes, which cap request bodies at
+262,144 bytes (256 KiB) per request. For larger uploads, send the file across
+multiple requests, store each part as its own object recorded in Store, and
+reassemble the parts on read. An `api` reply carries roughly 4 MiB, so serve
+larger objects from a public `content` route or return them in parts; see
+[Limits](/developers/limits/).
+
+Because the blob handle has no listing, metadata read, or conditional write,
+track stored keys and their metadata in Store.
+
+## Serve static content
+
+Map a `content` route to a `blob` binding and a `key_prefix`:
+
+```json filename="ferrite.json"
+{
+  "services": [{ "name": "site-assets", "primitive": "blob" }],
+  "applications": [{
+    "name": "site",
+    "artifact_key": "apps/site@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "web-assets", "kind": "blob", "service": "site-assets" }
+    ],
+    "routes": [{
+      "prefix": "/",
+      "binding": "web-assets",
+      "kind": "content",
+      "key_prefix": "site/",
+      "public": true
+    }]
+  }]
+}
+```
+
+With this route, `GET /` serves `site/index.html`, and any path ending in `/`
+serves that directory's `index.html`; see
+[Content routes and `index.html`](/developers/routing/#content-routes-and-indexhtml).
+
+A `content` route defaults to `"public": false`, which refuses any request that
+lacks a presigned capability token in `?token=`. Application code cannot mint
+that token, so a private `content` route cannot serve files to your users. Set
+`"public": true` for assets anyone may download, and serve private files through
+an `api` route that authorizes the caller first, as described under
+[Sensitive content](#sensitive-content).
+
+An `api` route takes precedence over a `content` route on every path both match.
+If your `api` route is mounted at `/`, it receives every request and the
+`content` route is never consulted. Give your API a distinct prefix such as
+`/api/` when serving static files alongside it.
+
+## Sensitive content
+
+Never mark a `content` route public when access depends on a user or tenant.
+Serve private files through an authenticated `api` route that checks
+authorization before reading the tenant-scoped object and returning its bytes.
+Keep the roughly 4 MiB `api` reply ceiling in mind: a larger reply times out at
+the ingress deadline, and the reason appears only in your application's logs.
+See [Limits](/developers/limits/) before returning large objects through an API
+handler.
+
+See [Authorization](/developers/authorization/) and
+[Headers & Cookies](/developers/headers-cookies/).

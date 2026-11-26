@@ -1,0 +1,77 @@
+---
+title: "Headers & Cookies"
+description: "Set response security headers and host-only cookies through IngressReply, forward required request headers, and enforce CSRF and referrer rules within gateway bounds."
+section: "Security"
+order: 5
+---
+
+Your application controls response headers and cookies through `IngressReply.headers`, and the gateway validates every `(name, value)` pair before writing the HTTP response. Push each header onto the reply directly:
+
+```rust
+let mut reply = IngressReply::to(request, 200, body);
+reply.headers.push(("x-content-type-options".into(), "nosniff".into()));
+```
+
+The gateway enforces fixed bounds on both responses and forwarded requests:
+
+| Direction | Gateway rule |
+| --- | --- |
+| Response header count | At most 16 headers per reply |
+| Repeated response headers | Only the first occurrence of a given name is relayed, so at most one `set-cookie` header reaches the browser per reply |
+| Stripped response headers | Dropped without error: `content-length`, `connection`, `transfer-encoding`, `upgrade`, `te`, `trailer`, `keep-alive`, `proxy-connection`, `x-correlation-id`, `access-control-allow-origin`, any `sec-websocket-*` name, and any value containing CR, LF, or NUL |
+| Gateway-added headers | The gateway writes `content-length` and `x-correlation-id` itself |
+| Forwarded request headers | Supported on `api` and `grpc` routes only, and only for names listed in `forward_headers`: at most 16 names totaling at most 512 bytes |
+| Non-forwardable request headers | `host`, `content-length`, `connection`, `transfer-encoding`, `upgrade`, `te`, `trailer`, `proxy-connection`, and any `sec-websocket-*` name |
+
+Two design constraints follow directly from these rules. First, your application cannot answer a CORS preflight or grant cross-origin browser access: the gateway emits `access-control-allow-origin` only when the operator's ingress policy names an origin, and applications do not configure that policy. Serve any browser page that calls your routes from the same application and host so browser requests stay same-origin. Second, a single response cannot emit two cookies, so flows that update a session cookie overwrite one name in place.
+
+## Set a browser session cookie
+
+Give authentication cookies the `__Host-` prefix and the narrowest scope that works. The `auth` package (`ferrite add auth`) sets one cookie:
+
+```text
+__Host-ferrite_auth=<opaque>; Path=/; Max-Age=<seconds>; HttpOnly; SameSite=Lax; Secure
+```
+
+Between sign-in start and the provider callback, the cookie holds `t.<transaction id>`. Once the callback succeeds, the response replaces that value with `s.<session id>` in the same `set-cookie` header. `SameSite=Lax` is required instead of `Strict` because the identity provider's redirect back to your callback is a cross-site top-level navigation, where a browser withholds a `Strict` cookie.
+
+On a plain-HTTP local fleet, and only when the `auth_dev_mode` secret is set to `insecure-local-http`, the package uses `ferrite_auth_dev` without the `__Host-` prefix or `Secure`. Never set `auth_dev_mode` on a deployed application.
+
+Follow three rules when managing session cookies yourself:
+
+- Never set `Domain` on a `__Host-` cookie.
+- Rotate the opaque cookie value on login, reauthentication, privilege change, and tenant change.
+- Replace cookies by overwriting the same cookie name in one `set-cookie` header, the same way `auth` replaces its transaction cookie with a session cookie. Because the gateway relays one `set-cookie` header per reply, you cannot clear one cookie and set a second in the same response; set any additional cookie on a subsequent reply so the browser keeps both.
+
+## Add response security
+
+Push these baseline security headers onto `reply.headers`:
+
+```text
+Content-Security-Policy: default-src 'self'; frame-ancestors 'none'
+Referrer-Policy: same-origin
+X-Content-Type-Options: nosniff
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+Cross-Origin-Opener-Policy: same-origin
+```
+
+Send `Referrer-Policy: same-origin` (or include `<meta name="referrer" content="same-origin">` in the HTML document) on every page that submits a form. Under `no-referrer`, browsers send `Origin: null` on form posts, which both the `auth` package's origin check and Alloy's action gate reject. Reserve `no-referrer` for redirects and for pages opened from token-bearing links.
+
+Tighten `Content-Security-Policy` to match the scripts, images, and connections your application actually uses rather than adding broad wildcards to clear a console warning.
+
+## CSRF
+
+Cookie-authenticated unsafe methods require both Origin validation and a session-bound CSRF token. The `auth` package accepts a state-changing request only when it comes from the configured origin (`origin`, or `sec-fetch-site: same-origin` when the browser omits `origin`) and carries the session's CSRF token from `GET /auth/session`.
+
+Because only the first `set-cookie` header reaches the browser, `auth` delivers the CSRF token in the response body (`csrf_token` from `GET /auth/session` or a hidden `_csrf` form input), never in a response header or a second cookie. Clients return that token in one of two ways:
+
+- In the `x-csrf-token` request header, which the route must declare in `forward_headers`.
+- In a hidden `_csrf` form field rendered by `session.csrf_field()`. The handler reads `_csrf` only when the forwarded `content-type` header indicates a urlencoded form, so the route must forward `content-type` as well. When both the header and the field are present, `x-csrf-token` takes precedence.
+
+See [Forms and the CSRF check](/developers/authentication/#forms-and-the-csrf-check) for full form wiring. Treat `SameSite` as an extra layer alongside Origin validation and the session CSRF token, and verify OAuth and OIDC callback flows before tightening `SameSite` globally.
+
+## Prevent token leakage
+
+After consuming an action link, redirect to a token-free URL and send `Referrer-Policy: no-referrer`. Never write session, reset, invitation, or magic-link material into logs or agent-visible page content.
+
+Next: wire up sign-in and CSRF checks in [Authentication](/developers/authentication/) or configure `forward_headers` in [Routing](/developers/routing/).

@@ -1,0 +1,235 @@
+---
+title: "Glossary"
+description: "Definitions of the terms used across Ferrite applications, manifests, deployments, and data services."
+section: "Reference"
+order: 5
+---
+
+Terms you encounter across Ferrite's developer documentation, ordered
+alphabetically, with links to the pages that cover each in detail.
+
+## Admission
+
+The pre-build validation a deployment must pass before Ferrite compiles it:
+manifest checks plus the static code gate, which refuses filesystem, process,
+listener, ambient network, and environment-variable access. Static admission
+filters disallowed source before compilation, while OS containment enforces the
+runtime boundary. Run `ferrite check` for a local check, or
+`ferrite check --remote` (MCP: `validate_spec` and `code_gate`) for the
+platform's authoritative verdict. See
+[What bounds your app](/developers/why-it-is-safe/).
+
+## Agent-ready app
+
+An application that serves HTML to people and exposes Markdown page equivalents,
+`robots.txt`, `llms.txt`, an OpenAPI description, and MCP tools to customers'
+assistants; each tool call invokes a handler your application provides. The
+`agent-ready` source package generates these endpoints from one `Surface`
+declaration. WebMCP, an emerging browser proposal, is the exception: the package
+does not generate WebMCP tools, so pages register them in their own scripts. See
+[Agent-ready apps](/developers/agent-native-apps/).
+
+## APE
+
+Short for atomic envelope: the service behind [transactions](#transaction),
+accessed in Rust through `ctx.ape("name")`. See
+[Transactions](/developers/transactions/).
+
+## Application
+
+A Rust program that Ferrite compiles from admitted source and runs as one or
+more supervised instances. At startup, the runtime injects handles exclusively
+for the services, routes, and outbound destinations declared in `ferrite.json`,
+along with the values of secrets configured via `ferrite secrets set` or
+`set_secret`.
+
+Applications share the host kernel. Ferrite launches each instance under its own
+unprivileged user ID inside private kernel namespaces with no network route of
+its own, behind a system-call filter and hard memory and CPU limits. See
+[What bounds your app](/developers/why-it-is-safe/) for each layer, what remains
+shared, and what stays outside platform enforcement, and
+[Functions](/developers/functions/) for process lifecycle.
+
+## Binding
+
+An entry in an application's `bindings` array in `ferrite.json` that connects
+one declared service of a given kind (`store`, `ape`, `queue`, `log`, `topics`,
+or `blob`) to a handle name you choose. Your code accesses the service through
+that [handle](#handle), for example `ctx.queue("jobs")`. See
+[App Manifest](/developers/app-manifest/).
+
+## Claim
+
+Either of two separate actions:
+
+1. Taking human ownership of an account a coding agent opened, by completing the
+   private ownership link returned by the MCP `claim_url` tool (or printed by
+   `ferrite claim` for a durable account).
+2. Moving a trial account's applications into a durable account before the trial
+   expires, using `ferrite claim` or the MCP `claim` tool.
+
+On a trial started by the CLI or a connector, the ownership link does both at once: **Keep this as my account** moves the trial's applications into a new durable account of the person's own, and **Move it into** moves them into one they already own. Linking an owner to a trial a script opened with `provision_ephemeral` does not extend its 48-hour clock; move its applications with `claim`.
+See
+[Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)
+and
+[Keep a trial app past its 48 hours](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
+
+## Credit
+
+The billing unit of an account's prepaid balance. One credit equals one US
+dollar; Ferrite's tools report amounts in micros (`1,000,000` per credit). Run
+`ferrite cost` (MCP: `estimate_cost`) to inspect your account balance, the
+deploy fee, and each application's projected monthly cost at current rates; it
+charges nothing and deploys nothing. See
+[Understand usage and credits](/kb/guide/usage-and-credits/).
+
+## Declaration
+
+The capability set recorded in an application's [manifest](#manifest): every
+service, route, forwarded request header, and outbound destination the
+application may reach. The runtime injects handles only for declared entries.
+See [App Manifest](/developers/app-manifest/).
+
+## Durable
+
+A guarantee that an acknowledged write or message survives crashes, restarts,
+and redeploys of your application. Ferrite's five durable primitives are
+Key-value Store, Transactions, Queues, Streams, and Object Storage. See
+[Choose a data primitive](/developers/data/) and
+[Reliability](/developers/reliability/).
+
+## Durable account
+
+An account with no 48-hour expiration window, distinct from a
+[trial account](#trial-account). Provision one with `ferrite login --id <name>`
+or the MCP `provision` tool.
+
+## Egress
+
+An outbound HTTP call sent through the platform gateway via a named handle such
+as `ctx.egress("payments")`. The target URL must match one of the absolute
+`https://` prefixes listed in `ferrite.json` literally; any other target is
+refused before network traffic leaves the host. See
+[Secrets & Egress](/developers/secrets-egress/).
+
+## Environment
+
+A named pointer to an [application release](#release-application-release), such
+as `prod`, `staging`, or `canary`, updated with `deploy_release` and `promote`.
+A [preview](#preview) is a temporary deployment and does not create an
+environment. See [Environments](/developers/environments/).
+
+## Fork
+
+An isolated copy of a deployed application (its code and bound service data)
+launched as a new application at its own host with `ferrite fork` or the MCP
+`fork` tool. `build_status` reports for each service whether its data was
+copied. See [State forks](/developers/environments/#state-forks).
+
+## Function
+
+The Build-section term for an application's running Rust code; synonymous with
+[application](#application). See [Functions](/developers/functions/).
+
+## Handle
+
+The string name your Rust code passes to `AppContext` to reach a declared
+resource, such as `ctx.store("votes")`, `ctx.queue("jobs")`, or
+`ctx.egress("payments")`. The runtime grants handles only for entries declared
+in `ferrite.json`.
+
+## Manifest
+
+The `ferrite.json` file at an application's root, also referred to as the spec
+in CLI flags. It holds the application's [declaration](#declaration) of
+services, bindings, routes, compute bounds, and outbound destinations. See
+[App Manifest](/developers/app-manifest/).
+
+## Object Storage
+
+A [durable](#durable) service that stores byte objects under keys you choose,
+reached through a `blob` binding. Writes return a digest of the bytes, and every
+read checks integrity against it. See
+[Object Storage](/developers/object-storage/).
+
+## Platform release
+
+A clean installation of the Ferrite platform performed by the operator who runs
+the installation. It is separate from an
+[application release](#release-application-release), which is an immutable named
+snapshot of one application's source.
+
+## Preview
+
+A temporary deployment of an application on its own host for inspecting a change
+before shipping it to an environment. `ferrite preview` commits the project's
+current source and runs the same build and admission checks as a standard
+deploy, without waiting for a test verdict, charging a fee, or cutting a
+release. Ferrite removes a preview two hours after creation. A preview is
+distinct from an [environment](#environment). See
+[Environments](/developers/environments/#preview).
+
+## Queue
+
+A [durable](#durable) work-distribution service with leases, acknowledgements,
+retries, delayed delivery, and dead-letter handling. Delivery is at least once.
+See [Queues](/developers/queues/).
+
+## Release (application release)
+
+An immutable, named revision of an application's source created with the MCP
+`cut_release` tool. An application deployed directly with `ferrite deploy` has
+no named releases until you cut one. Separate from a
+[platform release](#platform-release). See
+[Scaling & Releases](/developers/scaling-releases/) and
+[Environments](/developers/environments/).
+
+## Route
+
+A public path prefix declared in `ferrite.json` with a route kind. A `content`
+route serves files from a `blob` binding over `GET` and `HEAD` only. An `api`,
+`ws`, `stream`, or `grpc` route forwards HTTP requests, WebSocket messages,
+event streams, or gRPC calls to your application through a `queue` binding. See
+[Routing](/developers/routing/).
+
+## Secret
+
+A named value stored via `ferrite secrets set` or `set_secret` and injected into
+`ctx.secret(name)` on the next deploy. Secrets are write-only in the control
+plane and never returned by a read API, while the running application holds the
+plaintext value in memory and can call only declared outbound destinations. See
+[Secrets & Egress](/developers/secrets-egress/).
+
+## Source package
+
+Reusable Rust source copied into an application's `src/` tree by `ferrite add`
+with `@generated by ferrite-pkg` provenance headers. Source packages let your
+application add capabilities (such as sign-in via the `auth` package) while
+depending on `ferrite-app` alone. See [Packages](/developers/packages/).
+
+## Store
+
+A durable, linearizable key-value service with guarded updates, atomic counters,
+expiry, and ordered prefix scans. See [Key-value Store](/developers/store/).
+
+## Stream
+
+A [durable](#durable), append-only ordered log read by offset. A `topics`
+binding exposes multiple named streams over one `log` service. A `stream`
+[route](#route) is a different construct: it delivers live events to a client
+through a `queue` binding. See [Streams](/developers/streams/).
+
+## Transaction
+
+An atomic, guarded update across 1 to 64 keys executed through an [APE](#ape)
+(atomic envelope) binding via `ctx.ape("name")`. See
+[Transactions](/developers/transactions/).
+
+## Trial account
+
+An expiring `eph-` account created with `ferrite login --ephemeral` or the MCP
+`provision_ephemeral` tool. A trial account lasts 48 hours, starts with $50 of
+credit (which cannot be topped up), and runs one instance per application capped
+at 256 MiB of memory and half a CPU. When the 48 hours expire, the account
+closes and any running applications are withdrawn; move applications into a
+[durable account](#durable-account) beforehand with a [claim](#claim).

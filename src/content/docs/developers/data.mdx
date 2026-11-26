@@ -1,0 +1,51 @@
+---
+title: "Choose a data primitive"
+shortTitle: "Choose a data primitive"
+description: "Decide where your application's state lives: Key-value Store, Transactions, Queues, Streams, or Object Storage, with each primitive's primary limit and durability model."
+section: "Data"
+order: 0.5
+---
+
+Applications on Ferrite store state in five built-in primitives. You declare each
+one as a service in `ferrite.json` and reach it through a typed handle on
+`AppContext`. Pick the primitive before you design your keys or handlers, because
+each primitive carries a hard boundary that shapes how your code reads, writes,
+and scales.
+
+## The five primitives
+
+| Primitive | Use it for | First limit to design around |
+| --- | --- | --- |
+| [Key-value Store](/developers/store/) | Application records stored as keys and byte values, with compare-and-swap, atomic counters, expiry, and ordered prefix scans. Default home for most state. | Each prefix-scan page holds at most 1,024 records. |
+| [Transactions](/developers/transactions/) | One atomic decision across multiple keys, such as reserving stock while creating an order. All changes commit together or none do. | One commit spans 1 to 64 keys. |
+| [Queues](/developers/queues/) | Asynchronous work owned by one consumer at a time under a time-bounded lease. Unacknowledged messages return to the queue when the lease expires. | Delivery is at least once, so every worker effect must be safe to repeat. |
+| [Streams](/developers/streams/) | Append-only ordered history, such as audit logs or domain events, read back by offset and replayed on demand. | The platform's log policy controls retention; topics have no per-topic retention setting. |
+| [Object Storage](/developers/object-storage/) | Files and large binary payloads stored under keys you choose. | One object holds at most 16 MiB, and an upload through an `api` route is capped at 256 KiB per request. |
+
+Most applications combine several primitives: keep records and ownership in the
+Store, commit cross-record decisions through Transactions, hand follow-up work
+to a Queue, append immutable history to a Stream, and put file bytes in Object
+Storage while tracking metadata in the Store.
+
+All five primitives store raw bytes whose structure lives in your code. None
+enforces a schema, query language, or migration tool, so every new release must
+read what earlier releases wrote. Version your payload format from the start and
+keep a reader for each version still present in storage.
+
+Ferrite derives each service's shard count from the rates and volume declared in
+`ferrite.json`; manifests cannot set a shard count directly. A Store or Stream
+can span several shards, which changes how batches, scans, and whole-topic reads
+behave. Transactions and Queues always live in a single group, and any
+declaration whose workload requires more than one group is refused at deploy.
+Read each primitive's sizing guidance before your first deploy.
+
+For exact-term indexing inside the Store or integrating an external search
+provider, see [Search](/developers/search/).
+
+## What stored data survives
+
+An acknowledged write or queued message survives crashes, restarts, and
+redeploys of your application. Deploying a new version of your code leaves its
+stored data untouched. When you need to inspect or recover state from an earlier
+point in time, [Reliability](/developers/reliability/#copies-of-your-data)
+explains how a state fork copies an application's data as of a past timestamp.

@@ -1,0 +1,66 @@
+---
+title: "Reliability"
+description: "Understand what Ferrite handles during instance and host failures, and build handlers, queues, and recovery paths that survive at-least-once delivery."
+section: "Observe"
+order: 3
+---
+
+Ferrite replicates every storage plane, reschedules applications from a failed host onto healthy capacity, and switches traffic to a new release only once its instances run without restarts. Your application still determines when a side effect is safe to repeat and what counts as a valid recovery.
+
+## Build for retry
+
+Delivery in Ferrite is at least once. Every HTTP request arrives as a message on your application's request queue, and any queue lease that expires before `ack` is delivered again. Duplicate deliveries happen, and the platform does not deduplicate them for you. At the HTTP edge, the gateway retries only a stalled `GET`, up to three times; it never retries any other method.
+
+Every incoming request carries an `idempotency_key`: the client's `idempotency-key` header if sent, or the request's correlation ID otherwise. Persist that key alongside the state change it caused and short-circuit any request whose key already ran. That handles platform redelivery of the same queued request, because both deliveries carry the same key. It does not cover a client that retries after a dropped response without an `idempotency-key` header; without that header, the gateway treats the retry as a brand-new request with a new correlation ID and runs the effect again.
+
+Design every state-changing path around these five rules:
+
+- Attach an `idempotency-key` header to every retried client mutation.
+- Persist intent before publishing background work.
+- Call `ack` on a queue lease only after the effect has been stored.
+- Verify provider webhooks over exact request bytes and deduplicate provider event IDs.
+- Read current domain state in scheduled jobs so stale runs exit as no-ops.
+
+A message that exhausts its queue's delivery budget moves to the dead-letter queue. Dead letters continue counting against the queue's `volume_mib` until removed, so a queue packed with dead letters refuses new writes. List them with the MCP `dead_letters` tool and remove them with `remove_dead_letters` once you have fixed the underlying bug. See [Queues](/developers/queues/#delay-and-retry-work).
+
+Test idempotency locally by running three instances while the CLI kills worker processes roughly every five seconds so active leases expire and redeliver. Any non-idempotent mutation shows up as double-counted state:
+
+```bash
+ferrite dev --instances 3 --chaos 5
+```
+
+## Health and readiness
+
+During a deploy, Ferrite starts the new version alongside the running one and shifts traffic only after the new instances pass two consecutive checks with zero restarts. If new instances restart three times, the rollout halts and the running build continues serving.
+
+The platform judges health strictly by process liveness; it never probes an HTTP route inside your application. A build that boots cleanly yet cannot reach a required dependency will still go live. Expose a status route that checks critical dependencies, and after every deploy have you or your agent call that route and run the primary signed-in user flow.
+
+## When the balance runs out
+
+When a durable account's balance reaches zero, its applications stop. Ferrite keeps those stopped apps and their data for 30 days, then deletes them permanently with no recovery path. The `notifications` feed delivers low-balance warnings ahead of depletion, the stop event, and the scheduled deletion date.
+
+Adding enough credit automatically restarts every application you did not modify while stopped at its prior instance count and autoscale policy. Trial accounts follow different rules: they cannot be funded, have no 30-day retention window, and are suspended when trial credit runs out. See [Read credit and usage](/developers/dashboard/#read-credit-and-usage) for the notice schedule and restart rules, and [Usage and credits](/kb/guide/usage-and-credits/) for the exact thresholds.
+
+## Copies of your data
+
+A [state fork](/developers/environments/#state-forks) clones an application's code and data into a new application at its own host. Run `ferrite fork <copy> --as-of <time>` (or pass `as_of_unix_micros` to the MCP `fork` tool) to copy state from any instant within the last 14 days so you can inspect or recover records from before a bad write. Fork requests beyond retained history are refused.
+
+Check the status line the fork reports for every bound service before writing anything inside the copy:
+
+| Service mode | Meaning |
+| --- | --- |
+| `forked` | Isolated point-in-time copy; writes stay inside the fork. |
+| `shared` | Points at the live production service; writes in the fork modify production data directly. |
+| `empty` | Starts with no data. |
+
+Test any restoration procedure inside the fork and verify your application invariants before copying data back into production.
+
+## Roll forward or back
+
+For an application deployed with `ferrite deploy` or `deploy_source`, the MCP `rollback` tool swaps the running build with the previous artifact through the same deploy health gate. Calling `rollback` a second time swaps forward again, so it alternates between the last two artifacts. Rollback replaces code only: stored data stays as the newer version left it, so the older build must still be able to read that data shape. For applications using named releases, roll back with `rollback_release` (see [Scaling & Releases](/developers/scaling-releases/#recover)). After any recovery, verify `status`, the public route, and the primary signed-in user flow separately.
+
+If an application's instances crash-loop or fail startup preparation before app code executes, Ferrite parks the app: rollout pauses, further deploys are refused, and an `error` line lands in the notification feed. Fix the cause, then call the MCP `resume` tool (or `retry_park` where the installation exposes that name) to re-admit the app, as described in [Scaling & Releases](/developers/scaling-releases/#recover).
+
+A zero-balance stop is a separate state from parking: stopped apps restart automatically once credit is added, as described in [When the balance runs out](#when-the-balance-runs-out). Read the feed with `notifications`, or push events to a signed webhook with `set_notify_channel`, to catch stops, parking events, and refused deploys you did not initiate (see [Logs](/developers/logs/#read-account-notifications)).
+
+See [Scaling & Releases](/developers/scaling-releases/) and [Logs](/developers/logs/).

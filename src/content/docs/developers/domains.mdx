@@ -1,0 +1,153 @@
+---
+title: "Domains"
+description: "Bind a Ferrite application to a free hostname under ferrite.run or to a domain you own, with exact DNS records and verification steps."
+section: "Deploy"
+order: 3
+---
+
+Every application receives a generated platform hostname such as
+`2z6xa6mewg3itc9j.ferrite.run` on its first deploy. You can attach a readable
+hostname in two ways: claim a free name under `ferrite.run` (such as
+`shop.ferrite.run`) with no DNS changes, or bind a custom domain you own (such
+as `shop.example.com` or `example.com`) by publishing two or three DNS records
+at your DNS provider.
+
+Applications live under `ferrite.run`, a registrable domain of their own, while
+the platform keeps `ferrite.cloud` for its own services (the Dashboard, sign-in,
+these docs and the MCP endpoint). Browsers therefore treat each application as
+its own site: one application cannot read or set another's cookies, and none can
+set cookies for `ferrite.cloud`. Names under `ferrite.cloud` are reserved for the
+platform. An application's old `ferrite.cloud` address redirects to its
+`ferrite.run` address.
+
+Both paths run the same three steps: claim the name, verify ownership, and bind
+the hostname to an application. The CLI, the Dashboard, and MCP all support
+this workflow, and Ferrite obtains and renews the HTTPS certificate
+automatically.
+
+## With the CLI
+
+```bash
+ferrite domains add shop.example.com
+```
+
+`add` claims the hostname, verifies the claim, binds it to the application in
+`./ferrite.json` (or the app named by `--app`), and prints the DNS records to
+publish. Re-running the command is safe because it skips any step already
+completed. Once your DNS records are published, run:
+
+```bash
+ferrite domains check shop.example.com
+```
+
+`check` queries public DNS for every required record, reports any missing or
+mismatched entry, and requests `https://shop.example.com/`. Run
+`ferrite domains list` to inspect every hostname your account holds. See
+[CLI commands](/developers/cli-commands/#ferrite-domains) for all flags.
+
+## In the Dashboard
+
+Open **Domains**, enter the hostname, and click **Claim domain**. The Dashboard
+lists the required DNS records with copy buttons and keeps them available on
+that domain's detail page. Complete verification and bind the domain to your
+application from the same screen.
+
+## With MCP
+
+1. Call `claim_domain {domain}`. It returns `DomainClaimed {domain, verify_token}`.
+   Save `verify_token` immediately: it is issued once, and a second claim on
+   the same name is refused.
+2. Call `verify_domain {domain, presented_token}` with that token. It returns
+   `DomainVerified {verified: true}`.
+3. Call `bind_domain {domain, app}`. It returns `DomainBound {domain, app}`.
+4. Publish the DNS records below, then request `https://<domain>/` and confirm
+   the application answers.
+
+Call `list_domains {}` to list your account's hostnames alongside their
+verification status and bound applications.
+
+## The DNS records
+
+Free hostnames under `ferrite.run` require no DNS records. For a domain you
+own, publish these records at your DNS provider. Replace `shop.example.com`
+with your hostname, and replace `ferrite.cloud` with your installation's base
+domain if different.
+
+| Name | Type | Value | Purpose |
+| --- | --- | --- | --- |
+| `shop.example.com` | CNAME | `ferrite.cloud` | Routes traffic for the hostname to Ferrite. |
+| `_acme-challenge.shop.example.com` | CNAME | `_acme-challenge.shop.example.com.acme.ferrite.cloud` | Delegates DNS-01 certificate issuance and renewal to Ferrite. |
+| `_ferrite-challenge.shop.example.com` | TXT | the `verify_token` from the claim | Proves ownership of the hostname. |
+
+The `_acme-challenge` record delegates only the certificate authority's DNS-01
+challenge into Ferrite's own zone, so Ferrite never needs write access to your
+DNS. Within roughly ten minutes after both CNAME records resolve, Ferrite
+issues the HTTPS certificate and `https://shop.example.com/` begins serving
+your application. If a record is missing on the first attempt, Ferrite retries
+one hour later. Set a TTL of 300 seconds or lower during initial setup so typos
+expire quickly.
+
+The platform currently checks the verification token directly without reading
+DNS, so the TXT record does not block verification. Publish it anyway:
+installations that verify domain claims from DNS read that record.
+
+### A domain's apex
+
+Standard DNS forbids a `CNAME` record at the zone apex (`example.com`). Point
+an `ALIAS`, `ANAME`, or flattened `CNAME` record at `ferrite.cloud` (supported
+by Cloudflare, DNSimple, Netlify DNS, and most managed DNS providers). If your
+provider does not support apex aliasing, serve the application on
+`www.example.com` with a `CNAME` and redirect the bare domain at your provider.
+The `_acme-challenge` record sits on a subdomain, so it is always a standard
+`CNAME`.
+
+Direct `A` records pointing to the platform's current IP addresses also route
+traffic, but those addresses can change on a platform release. Prefer aliasing
+or a `www` redirect.
+
+## Free names
+
+Any single-label hostname under `ferrite.run`, such as `shop.ferrite.run`, is
+a free name. Claim, verify, and bind it with the same steps above, and it serves
+immediately under the platform's wildcard certificate for `*.ferrite.run`.
+Allocation is first come, first served and limited to one label deep:
+multi-label names like `a.b.ferrite.run` are refused because no certificate
+covers them. Names of exactly 16 lowercase letters and digits are also refused,
+because that is the shape of a generated platform hostname.
+
+## What to know before you announce a name
+
+- Hostname claims are first come, first served across the entire installation.
+  Once an account holds a name, `claim_domain` returns `domain already claimed`
+  to every other account. If a domain you own is already claimed, contact the
+  Ferrite team
+  ([Get help from the Ferrite team](/kb/guide/get-help-from-the-ferrite-team/)).
+- There is no API to release a claim or delete a binding, and withdrawing the
+  application leaves its binding in place. Rebind the hostname to another app
+  in your account to move it.
+- `bind_domain` and `list_domains` confirm the stored binding. They do not
+  verify live DNS routing or certificate readiness. Hit the URL directly or run
+  `ferrite domains check` before sharing the address.
+- `ferrite deploy` rebinds every domain attached to the application after each
+  deploy and reports any failure. Clients deploying over MCP alone should test
+  each domain after a deploy and call `bind_domain` again if the route dropped.
+
+## Choose one canonical host
+
+Binding a custom or free domain does not retire the application's generated
+platform host; the application answers at both addresses. Choose one canonical
+origin and emit it everywhere an absolute URL appears.
+
+Authentication breaks when users bounce between two hosts. The `auth` package
+sets a `__Host-` cookie that browsers return only to the exact host that issued
+it, and it builds callback URLs from the single origin stored in
+`auth_public_origin`. A user signed in on one host is logged out on the other.
+Passkeys registered on one hostname fail on another as well. Give each separate
+sign-in configuration its own host instead of mounting two sign-in setups under
+different paths of one host. See [Authentication](/developers/authentication/).
+
+Generate your sitemap, `llms.txt`, OpenAPI specification, agent card, and MCP
+endpoint URLs from the canonical origin so crawlers and assistants index one
+address. Production discovery documents must never expose a preview host. See
+[Agent-ready apps](/developers/agent-native-apps/) and
+[Headers & Cookies](/developers/headers-cookies/).

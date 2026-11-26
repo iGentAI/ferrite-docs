@@ -1,0 +1,119 @@
+---
+title: "Key-value Store"
+shortTitle: "Key-value Store"
+description: "Keep application records as keys and byte values with linearizable reads and writes, compare-and-swap, atomic counters, expiry, and ordered prefix scans."
+section: "Data"
+order: 1
+---
+
+Ferrite's Key-value Store holds application records as keys and raw byte values
+as the default place for application state. By default, every write
+that returns has committed and is visible to every later read. Values are opaque
+bytes interpreted by your code: the store has no schema, secondary indexes, or
+query language, so your key layout determines how you look up and scan records.
+
+## Declare a store
+
+Declare a `store` service and bind it to your application in `ferrite.json`:
+
+```json filename="ferrite.json"
+{
+  "services": [{ "name": "catalog", "primitive": "store" }],
+  "applications": [{
+    "name": "catalog-api",
+    "artifact_key": "apps/catalog-api@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [{ "handle": "catalog", "kind": "store", "service": "catalog" }]
+  }]
+}
+```
+
+Fetch the handle from `AppContext`:
+
+```rust filename="src/main.rs"
+let mut catalog = ctx.store("catalog")?;
+catalog.put(b"product/coffee", br#"{"name":"Coffee","stock":24}"#).await?;
+let product = catalog.get(b"product/coffee").await?;
+```
+
+Besides `put` and `get`, the handle exposes `delete(key)`, `multi_get(&keys)`
+for up to 256 keys, and `put_batch(&entries)` for up to 256 writes.
+
+Ferrite derives a store's shard count from its declared workload rates and
+volume; manifests cannot set a shard count directly. On a single-shard store,
+`multi_get` reads every key at one consistent point and `put_batch` commits all
+writes atomically. When the declared workload spans multiple shards, `multi_get`
+reads each shard separately, `put_batch` is atomic only within each shard, and
+each prefix-scan page merges results across shards. A store keeps the shard
+count chosen at initial placement, and a later manifest that requires more
+shards is refused, so size the workload before your first deploy.
+
+## Choose read consistency
+
+Reads and writes are linearizable by default: every read goes through the
+store's authoritative group and sees every write that returned before it.
+
+To allow local-zone reads with read-your-writes guarantees, declare
+`"consistency": { "reads": "RYW" }` on the service. A replica in the instance's
+own zone answers the read once it has caught up with what the instance wrote or
+observed, and falls back to the primary otherwise. For a single read that can
+tolerate bounded staleness, call `get_within_ms(key, max_lag_ms)` or
+`get_within_lag(key, max_lag)`.
+
+## Choose a key shape
+
+Use stable hierarchical prefixes such as
+`tenant/{tenant_id}/order/{order_id}`. Start every private key with its owning
+tenant or workspace so prefix scans return only that tenant's records and keys built
+from user input cannot reach across tenants.
+
+`scan_prefix(prefix, start_after, limit)` returns matching records in key order
+without running an unbounded query. One page holds at most 1,024 records and
+reports whether more follow; pass the last key from the page as `start_after` to
+read the next page.
+
+## Size the store
+
+A store reserves its declared `volume_mib` on disk across every replica,
+defaulting to 128 MiB when omitted. Any write that would grow the store past
+that ceiling fails with `VOLUME_REFUSED`. Declare the space your data needs with
+room to grow, and avoid padding it, because hosted test runs reserve the full
+declared volume again for each live test environment. See
+[Application manifest](/developers/app-manifest/) for the `workload` fields that
+control store sizing.
+
+## Guard concurrent updates
+
+Use compare-and-swap (`put_if_version`, passing the version returned by
+`get_versioned`) for versioned records and atomic `add` for counters. A failed
+comparison means another writer won; reload the record and re-evaluate your
+domain action instead of overwriting after a stale read.
+
+In the platform build, the store handle also offers
+`put_if_version_guarded(key, value, expected, &guards)`. It commits only when
+`key` matches `expected` and each of up to 8 additional keys holds the exact
+bytes you name. Every guard key must live on the same shard as `key`. On a
+single-shard store that always holds; on a sharded store, a guard on another
+shard fails with an error naming both keys and is never checked separately from
+the write. The local SDK used by `ferrite check` and `ferrite dev` does not
+declare `put_if_version_guarded`, so code calling it compiles only in the
+platform build.
+
+For caches, invitations, and temporary views, use expiring writes
+(`put_expiring`, `add_expiring`, `put_if_version_expiring`). Pass an absolute
+timestamp in epoch milliseconds (`ctx.now_ms() + ttl_ms`) rather than a relative
+duration. Once expired, a key reads as absent everywhere without running any
+code. When a scheduled effect must fire after a deadline, use
+[Cron Jobs](/developers/cron-jobs/).
+
+## Version your stored values
+
+Redeploying your application leaves stored data intact, which means new code
+must read what earlier versions wrote. Because the store has no schema or
+migration tool, tag stored payloads with a format version and keep a reader for
+every version still live in storage.
+
+Use [Transactions](/developers/transactions/) when one decision spans several
+keys, [Queues](/developers/queues/) for asynchronous work, and
+[Object Storage](/developers/object-storage/) for large payloads.
+[Choose a data primitive](/developers/data/) compares all five primitives.

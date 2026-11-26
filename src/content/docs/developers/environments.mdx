@@ -1,0 +1,155 @@
+---
+title: "Environments"
+description: "Develop locally, validate in expiring previews, fork live state safely, and promote immutable releases across named environments."
+section: "Deploy"
+order: 2
+---
+
+Ferrite gives you four isolated ways to verify a change before users see it:
+`ferrite dev` on your machine, an expiring preview on its own host, a state
+fork that copies the application and its live data, and named environments
+promoted from immutable releases. A direct `ferrite deploy` uses none of those
+safeguards and replaces the running generation in place, so test risky changes
+on a preview or a fork first.
+
+## Local
+
+`ferrite dev` runs your application locally against persistent local copies of
+the platform services behind a gateway on `localhost`. You can run multiple
+instances with `--instances` or inject timed process restarts with `--chaos`
+without touching any cloud account. Local dev is a single-node emulation and
+skips remote admission and attested builds, so code that passes locally can
+still be rejected at deploy time.
+
+One behavior differs from production by design: when a handler omits
+`content-type`, `ferrite dev` infers a MIME type so pages render in your
+browser. The production gateway sends no fallback header, so browsers download
+the response instead of rendering it. Set `content-type` explicitly on every
+response, and test gateway-dependent behavior such as streaming routes and
+response headers on a preview before shipping.
+
+## Preview
+
+`ferrite preview` commits your current source and deploys it to a dedicated
+host. A preview runs the same admission checks and remote build as a normal
+deploy, requires no test verdict, incurs no charge, creates no release, runs
+one instance, and is removed automatically two hours after creation. Test it in
+a browser, over its HTTP and MCP routes, and with automated checks. Preview
+builds run in the background; see
+[Preview and release verbs](/developers/deployments/#preview-and-release-verbs)
+for polling to the preview host. Because a preview runs with the base
+application's secrets, treat its outbound calls with the same care as
+production.
+
+Previews are never promoted directly. Once the change checks out, ship the same
+source with `ferrite deploy`, deploy the commit with `deploy_ref`, or cut a
+release with `cut_release` and promote it through [Production](#production).
+Where an installation enforces test gates, both `deploy_ref` and `cut_release`
+require a passing test verdict on the commit, even though the preview did not.
+
+## State forks
+
+A state fork clones a running application and its data into a new application
+with its own host and lifecycle while the source keeps serving traffic. Use
+forks to reproduce production issues, test data migrations, or validate an
+agent's change against real data. The fork reuses the source's compiled
+artifact and copies its key-value store, queues, streams, object storage, and
+APE (atomic envelope) records. It starts without any of the source's secrets:
+`ctx.secret` returns `None` until you set secrets on the fork and deploy it.
+Create a fork through the CLI, via MCP, or in the Dashboard under the
+application's **Autoscale and fork** settings with **Fork app**.
+
+Only services backed by a per-resource engine are copied. `build_status` for
+the fork reports one status line per service: `forked` means the data was
+copied at the fork instant, `shared` means the service has no dedicated engine
+so the fork reads and writes the source's live data directly, and `empty` means
+the service is isolated by a platform prefix inside a shared engine and starts
+blank. Read every service line before writing through a fork; only `forked`
+services are isolated copies.
+
+Every per-resource service is snapshotted at the same instant, so cross-service
+state stays causally consistent. Pass `as_of_unix_micros` over MCP or
+`ferrite fork --as-of` in the CLI to fork state from any point within the last
+14 days. Any `shared` service still reflects the source's current data rather
+than the historical instant.
+
+The CLI creates the fork and waits until the copy is running. Without `--app`,
+it forks the application named in `./ferrite.json`:
+
+```bash
+ferrite fork orders-investigation --app orders
+ferrite fork orders-yesterday --app orders --as-of <rfc3339-timestamp>
+```
+
+`--as-of` accepts an RFC 3339 timestamp with timezone (such as
+`YYYY-MM-DDTHH:MM:SSZ`) or Unix microseconds, and `--json` prints a single JSON
+object. Over MCP, invoke `fork` for any source-deployed application you own:
+
+```json
+{
+  "app": "orders",
+  "fork_app": "orders-investigation"
+}
+```
+
+Substitute your source application name for `orders` and an unused target name
+in your account for `orders-investigation`. The operation counts against
+account quotas and returns `BuildStarted {build_id}` immediately. Poll
+`build_status` until it reaches `deployed` (which includes the fork's host and
+per-service lines) or `failed` with the error reason. Inspect the fork's state
+before relying on it.
+
+A fork is billed as a separate application: it reserves its own compute and
+pays for storage as its data diverges. Run `estimate_cost` (or `ferrite cost`)
+before forking to check the monthly instance rate. When finished, call
+`withdraw` on the fork name to remove the application, its compute, and its
+data without affecting the source. If you committed to the fork's hosted source
+repository, that repository can outlive withdrawal and count against your
+account's repository limit. Where your endpoint exposes them,
+`repository_usage` reports repository storage and `delete_repository` removes
+an unused repository.
+
+Forking copies pending queue items and consumer offsets, so workers inside the
+fork can pick up and retry queued jobs. Because the fork runs the source's
+artifact and manifest under its new name, it permits the same declared outbound
+destinations. Missing secrets cause authenticated calls to fail initially, but
+before setting any secret on a fork of an application that processes payments,
+sends notifications, or writes to external systems, redeploy the fork with a
+manifest that removes those destinations. A `forked` service isolates internal
+data while a `shared` service does not, and neither can undo an outbound call
+already sent. Apply the same privacy and access controls to personal data in a
+fork as you do in production.
+
+State forks are distinct from empty previews and source branches. See
+[Reliability](/developers/reliability/) for recovery procedures.
+
+## Production
+
+`ferrite deploy` runs admission and the attested build and replaces the running
+generation directly. It creates no release and moves no environment pointer.
+
+Applications that need staged promotion and explicit rollback use application
+releases instead. An application release is an immutable named snapshot of one
+committed revision of an application, and an environment is a named pointer to
+one release. Follow this sequence:
+
+1. Commit source with `rcs_commit`, or run `ferrite preview` to commit
+   automatically.
+2. Cut a release from that commit with `cut_release`. When the installation
+   requires tests, the commit must carry a passing test verdict.
+3. Deploy the release to an environment with `deploy_release`.
+4. Promote the verified release to the next environment with `promote`, such as
+   from `staging` to `prod`.
+
+Call `rollback_release` to move an environment pointer back to an earlier
+release. The CLI does not expose release commands; use the MCP tools above or
+the Dashboard's app Settings tab, which supports all four actions. Query
+release state via MCP with `releases`, `environments`, and `deploy_history`.
+See [Scaling & Releases](/developers/scaling-releases/).
+
+Release records and direct source deployments are separate read models.
+`releases`, `environments`, and `deploy_history` remain empty for any
+application deployed through `deploy_source` (`ferrite deploy`), and clients
+must not synthesize release or environment records for it.
+
+See [Deployments](/developers/deployments/) and [Domains](/developers/domains/).

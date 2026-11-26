@@ -1,0 +1,120 @@
+---
+title: "Limits"
+description: "Manifest, source, request, payload, trial, and account balance limits enforced by Ferrite."
+section: "Reference"
+order: 4
+---
+
+Ferrite enforces limits at two stages: during pre-build admission and on every
+request at runtime. Run `ferrite validate` to check static manifest rules,
+`ferrite check` to add local source admission and compilation, and
+`ferrite check --remote` to query the platform directly for the authoritative
+deploy verdict.
+
+## Manifest bounds
+
+| Setting | Accepted value |
+| --- | --- |
+| `compute.memory_mb` | Omit it, or set at least 16 MiB. When omitted, the manifest sets no per-instance memory ceiling, though account and fleet policy can still impose one. |
+| `compute.cpu_percent` | Omit it, or set at least 1. A value of 100 equals one full core; values above 100 allocate multiple cores. When omitted, the manifest sets no per-instance CPU ceiling. |
+
+Local development adds two flag-level bounds outside `ferrite.json`:
+`ferrite dev --instances` accepts `1` through `32`, and `ferrite dev --chaos`
+accepts `0` through `3,600` seconds.
+
+Account and fleet policy can impose tighter ceilings than manifest syntax
+allows. A trial account lasts 48 hours and starts with $50 of credit, which is
+also its hard spend cap because trial accounts cannot be funded. Each trial
+application runs one instance capped at 256 MiB of memory and half a CPU, with
+source uploads capped at 32 MiB. A deploy declaring higher compute or more
+instances is clamped to those trial ceilings without refusal; subsequent
+`scale`, `autoscale`, or `set_compute_limit` calls above them are refused by
+name. Call `estimate_cost` to inspect the active caps on your account. Once the
+48 hours expire, the trial closes and any running applications are withdrawn;
+see [Keep a trial app past its 48 hours](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours)
+to move applications into a durable account before the deadline.
+
+## Source and authority
+
+A deployable application may depend on `ferrite-app` alone; install shared
+functionality as Ferrite source packages with `ferrite add`. The admission gate
+refuses filesystem, process, listener, ambient network, and environment-variable
+access (`std::env`, `env!`, `option_env!`).
+
+Declare every service, route, forwarded request header, and outbound destination
+in `ferrite.json`. Anything omitted from the manifest is unreachable at runtime.
+
+Do not declare secrets in `ferrite.json`; the platform refuses
+`required_secrets`. Store each secret before deploying with
+`ferrite secrets set` or the MCP `set_secret` tool so the deploy injects it into
+`ctx.secret(name)`. Secrets are write-only through the control plane and never
+returned by a read API. At runtime your process holds the plaintext value in
+memory and can call only declared outbound destinations. Added, rotated, or
+deleted secrets take effect on the next deploy; `ferrite deploy` submits a build
+after a CLI secret change even when source files have not changed. See
+[Secrets & Egress](/developers/secrets-egress/) for what remains your code's
+responsibility.
+
+## Request and work bounds
+
+Ferrite's gateway, egress proxy, and data services enforce the following bounds
+on every application. Individual installations can configure tighter ceilings.
+
+| Bound | Value |
+| --- | --- |
+| Request head | 16 KiB for the request line and headers (exceeding returns `431`); more than 64 request headers returns `400`. |
+| Request body | 262,144 bytes (256 KiB); one byte more returns `413`, and `Transfer-Encoding: chunked` returns `400`. |
+| Reply body | Roughly 4 MiB of raw bytes per `api` reply. Larger replies time out at the ingress deadline, with the cause logged only in your application logs. |
+| Reply headers | 16 maximum; headers past the sixteenth are dropped. Only the first `set-cookie` header is forwarded. |
+| Forwarded request headers | Only header names listed in `forward_headers`, up to 16 names (512 bytes total across names), on `api` and `grpc` routes only. `host` and HTTP framing headers cannot be forwarded. |
+| Ingress deadline | 10 seconds by default and 8 seconds in the standard fleet gateway configuration; design handlers for 8 seconds. Past the deadline the gateway answers `504` even if your handler still finishes its work. |
+| Methods | `api` routes forward `GET`, `POST`, `PUT`, `PATCH`, and `DELETE`; `OPTIONS`, `HEAD`, and `TRACE` return `405`. `content` routes serve `GET` and `HEAD` only. |
+| Egress | 2 seconds to connect, 2 seconds for TLS handshake, 10-second response timeout, 25-second total deadline for a buffered delivery or stream open, 1 MiB buffered response body limit, and 30 seconds of stream silence; response headers are stripped and redirects are not followed. |
+| Waiting requests | 1,024 in-flight requests waiting for a reply by default. Beyond that limit the gateway answers new requests with `429` and `Retry-After` before publishing to the queue. See [Ingress limits and status codes](/kb/guide/ingress-limits-429-402/). |
+| WebSocket message | 1 MiB; a larger message, or a fragmented message that grows past 1 MiB, closes the connection. |
+| Queue message | 16 MiB per message (framing included); larger publishes are refused before anything is written. |
+| Object | 16 MiB per object under the default object-service bound; larger `put` calls are refused. See [Object Storage](/developers/object-storage/) to store larger payloads in chunks. |
+
+Local `ferrite check` does not match every platform bound, so a manifest that
+passes locally can still be refused at deploy:
+
+- `ferrite check` allows up to 64 forwarded header names (1,024 bytes total),
+  while the platform refuses more than 16 names (512 bytes total).
+- `ferrite check` accepts `forward_headers` on `ws` and `stream` routes, while
+  the platform permits them on `api` and `grpc` routes only.
+- `ferrite check` does not recognize the `grpc` route kind, which the platform
+  accepts.
+
+Design against the platform figures in the table above and run
+`ferrite check --remote` for the authoritative verdict.
+
+Keep log records, notification bodies, and MCP results small. Because queue
+delivery is at least once, write every worker to tolerate duplicate deliveries
+until its acknowledgement commits. Answer API requests inside the ingress
+deadline; offload longer work to a Queue and return an operation identifier
+immediately.
+
+Use [Object Storage](/developers/object-storage/) for large payloads,
+[Queues](/developers/queues/) for asynchronous work, and
+[Reliability](/developers/reliability/) for timeout and retry patterns.
+[Ingress limits and status codes](/kb/guide/ingress-limits-429-402/) explains
+which status codes clients should retry.
+
+## Account bounds
+
+Your account's prepaid balance and the spending limits configured in the
+[Dashboard](/developers/dashboard/#read-credit-and-usage) act as hard runtime
+bounds. Every charge draws from the prepaid balance, and any deploy the balance
+cannot cover is refused (`INSUFFICIENT_CREDIT` in the CLI, `InsufficientCredit`
+in MCP). Installations can also meter running applications and incoming
+requests; run `estimate_cost` to see which meters apply. When requests are
+metered, the gateway answers any request the balance cannot fund with
+`402 Payment Required` before invoking your application.
+
+When a funded account's balance reaches zero, its applications stop and remain
+preserved for 30 days before permanent deletion along with their data. Trial
+accounts cannot be funded and suspend their applications as soon as credit runs
+out. The `notifications` tool records deploys refused for lack of credit and
+applications stopped at zero balance. See
+[Understand usage and credits](/kb/guide/usage-and-credits/) for balance
+tracking, statements, charges, and top-ups.

@@ -1,0 +1,195 @@
+---
+title: "App Manifest"
+description: "Declare an application's services, bindings, routes, compute limits, and outbound destinations in ferrite.json."
+section: "Reference"
+order: 1
+---
+
+`ferrite.json` is your application's contract with the platform. It declares
+the services that exist, the handle bindings your code receives, the public
+routes that reach it, its compute bounds, and the outbound destinations it may
+call. Ferrite injects handles for those declared resources and no others, so
+anyone reviewing an app can see its full surface from one file without reading
+the Rust source.
+
+Secrets are never declared in `ferrite.json`. Set them on the app with
+`ferrite secrets set` (MCP: `set_secret`) and list their names with
+`ferrite secrets list`. A secret is written once and never returned by a read;
+the running application receives its value at deploy and can call out only to
+declared destinations. See [Secrets & Egress](/developers/secrets-egress/) for
+reading secrets in code and what this boundary does not stop.
+
+## A typical manifest
+
+```json filename="ferrite.json"
+{
+  "services": [
+    { "name": "shop-state", "primitive": "store",
+      "workload": { "read_qps": 50, "write_qps": 5, "record_size_kb": 1, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "shop-jobs", "primitive": "queue",
+      "workload": { "read_qps": 20, "write_qps": 10, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "shop-requests", "primitive": "queue",
+      "workload": { "read_qps": 20, "write_qps": 10, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "shop-replies", "primitive": "queue",
+      "workload": { "read_qps": 20, "write_qps": 10, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } },
+    { "name": "shop-assets", "primitive": "blob",
+      "workload": { "read_qps": 50, "write_qps": 5, "record_size_kb": 0, "keying": "PerKey", "hot_set_gib": 0 } }
+  ],
+  "applications": [{
+    "name": "shop",
+    "artifact_key": "apps/shop@v1",
+    "artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "bindings": [
+      { "handle": "state", "kind": "store", "service": "shop-state" },
+      { "handle": "jobs", "kind": "queue", "service": "shop-jobs" },
+      { "handle": "requests", "kind": "queue", "service": "shop-requests" },
+      { "handle": "replies", "kind": "queue", "service": "shop-replies" },
+      { "handle": "assets", "kind": "blob", "service": "shop-assets" }
+    ],
+    "routes": [
+      { "prefix": "/api/", "binding": "requests", "kind": "api" },
+      { "prefix": "/", "binding": "assets", "kind": "content", "key_prefix": "site/", "public": true }
+    ],
+    "egress": [{ "handle": "stripe", "destinations": ["https://api.stripe.com/"] }],
+    "compute": { "memory_mb": 128, "cpu_percent": 50 }
+  }]
+}
+```
+
+`artifact_key` names the build, conventionally `apps/<name>@v1`. Leave
+`artifact_sha256` set to the 64-zero placeholder: the platform compiles your
+source remotely and writes the attested build digest in its place. Any value
+that is not 64 lowercase hexadecimal characters fails with
+`APP_ARTIFACT_HASH_MALFORMED`.
+
+A manifest declares exactly one application. Zero or multiple entries in
+`applications` fail with `APP_CARDINALITY`, so deploy each additional app from
+its own manifest. Beyond the fields shown above, an application accepts
+`resources`, `depends`, `instances`, and `autoscale`, and a binding accepts
+`key_prefix`. `depends` parses, but because it references another application
+in the same spec, it cannot be deployed. Every object rejects unrecognized
+fields remotely with `SPEC_PARSE` that names the bad key and the accepted ones
+(one key per round trip), and rejects a service's `placement` and
+`economics.provider_region` with `SPEC_PHYSICAL_FIELD_RETIRED`. Local
+`ferrite validate` tolerates unknown keys, so use `ferrite check --remote` or
+the MCP `validate_spec` tool for the platform's verdict.
+
+A service also accepts `volume_mib`, `consistency`, `durability`, and
+`economics`:
+
+- `consistency` holds `reads` only: `"Strong"`, `"RYW"`, `"Eventual"`, or a bounded staleness
+  such as `"BoundedStaleness(25ms)"`. Bounds below 25 ms fail with
+  `DELTA_UNFEASIBLE`.
+- `durability` requires both `class` and `fallback`, each one of `R3Sync`,
+  `R3Memory`, or `R2Async`, and may add `survives` (`Machine`,
+  `AvailabilityZone`, or `Region`). `fallback` must be no stronger than `class`
+  in the order `R3Sync`, `R3Memory`, `R2Async`; a stronger fallback fails with
+  `DURABILITY_FALLBACK_NOT_WEAKER`. A durability class describes write
+  replication within one installation.
+- `economics` requires both `monthly_nte_usd` and `utilization_target`.
+  `monthly_nte_usd` states an expected monthly figure; the platform estimates
+  against a provider price table (not its own meter) and reports `NTE_EXCEEDED`
+  as advice when the estimate is higher, without refusing a deploy or stopping
+  a running service. It is not a spending limit. Actual spend is bounded by
+  your prepaid balance and the spending limits configured in the
+  [Dashboard](/developers/dashboard/#read-credit-and-usage); when the balance
+  hits zero, your applications stop.
+
+## Services
+
+A service's `primitive` must be one of `store`, `log`, `queue`, `ape`, or
+`blob`; any other value fails with `SERVICE_PRIMITIVE_UNKNOWN`. Named topics
+are not a separate primitive: declare a `log` service and bind it with kind
+`topics`. Functions are declared under `applications`.
+
+Application state lives in the key-value store (`store`), guarded multi-key
+transactions over it (`ape`), streams (`log`), queues (`queue`), and object
+storage (`blob`).
+
+Declare a `workload` on every service that describes its expected read and
+write rates, record size, keying, and hot set, as the `ferrite new` templates
+do. The CLI inserts conservative defaults when a service omits `workload`.
+Validate against the target platform before deploying, since reservation rules
+depend on the serving release.
+
+For `store` services, set a positive `record_size_kb` and `hot_set_gib: 0` to
+select the platform's 64 MiB resident default; zero hot set does not disable
+caching. The default volume is 128 MiB, and a larger hot set requires a
+matching `volume_mib`. Any write that would grow a service past its declared
+volume fails with `VOLUME_REFUSED`, so size `volume_mib` to your expected data
+with room to grow. Avoid padding it unnecessarily: each replica reserves the
+full volume on disk, and hosted test runs (`test_ref`) reserve every declared
+volume again per live test environment, so oversized declarations can fill the
+test builder's disk. The platform rejects a store with `record_size_kb: 0` as
+`SERVICE_WORKLOAD_RECORD_SIZE_ZERO`, and rejects a hot set larger than the
+volume as `SERVICE_WORKLOAD_HOT_SET_ABOVE_VOLUME`.
+
+## Bindings
+
+`handle` is the name your Rust code passes to `AppContext`. Binding kinds are
+`store`, `log`, `topics`, `queue`, `ape`, and `blob`. `topics` binds a `log`
+service; every other kind binds a service with the matching primitive. Bind
+only the resources the application actually uses.
+
+## Routes
+
+Choose `api`, `grpc`, `content`, `ws`, or `stream`. `api` and `grpc` routes
+accept an explicit `forward_headers` allowlist of up to 16 header names (512
+bytes total); `grpc` also accepts `server_streaming` with up to 64 methods.
+Local `ferrite check` does not recognize `grpc`, so run `ferrite check --remote`
+for manifests carrying `grpc` routes. `stream` and `ws` routes cannot forward
+headers.
+
+`rate_limit_per_min` on a route (from 1 to 1,000,000) declares a request budget
+for gateways that enforce one. Enforcement of `rate_limit_per_min` is not
+established on Ferrite Cloud, so `ferrite deploy` and `ferrite cost` hold any
+manifest that carries the key and say why. Keep the key if an existing manifest
+already declares it, and do not bypass the hold with raw `deploy_source`. See
+[Rate limits](/developers/rate-limits/) for the hold and how to enforce route
+budgets with the `http-route-budget` package.
+
+Among `api` and `stream` routes, the longest matching prefix wins regardless of
+order in the file. `content` routes are checked only when no `api` or `stream`
+route matched, so an `api` route at `/` hides every `content` route. When an
+`api` route owns `/`, serve static assets from that handler, as the `alloy` and
+`nitro` packages do.
+
+## Compute and egress
+
+Admission validates compute bounds and outbound authority before your app runs.
+`memory_mb` below 16 fails with `COMPUTE_MEMORY_TOO_SMALL`, and `cpu_percent: 0`
+fails with `COMPUTE_CPU_INVALID`. A `cpu_percent` of 100 allocates one full
+core; values above 100 allocate multiple cores.
+
+`instances` declares the replica count; when omitted, the deploy count applies
+(`ferrite deploy --instances N`). `autoscale` declares a scaling policy where
+only `max` is required. The remaining fields default to `min: 1` (set `0` to
+scale to zero), `capacity_per_replica: 100`, `target_pct: 60`, `high_pct: 80`,
+`low_pct: 30`, `cooldown: 2`, and `sustain: 2`.
+
+Trial accounts cap compute and scale regardless of manifest values: declared
+memory above 256 MiB or CPU above 50% is lowered to 256 MiB and 50%, undeclared
+fields take those caps, deploys run one instance, and the `scale` and
+`autoscale` tools reject counts above one.
+
+Each `egress` entry lists public URL prefixes in `destinations`. Every
+destination must be an absolute `https://` prefix with a well-formed host and
+no credentials in the authority (`APP_EGRESS_DESTINATION_MALFORMED`). Private,
+loopback, and link-local addresses, single-label names, and the platform's own
+domain fail with `APP_EGRESS_INTERNAL_DESTINATION`.
+
+## Validate and read the cost
+
+```bash
+ferrite validate --json
+ferrite check --json
+ferrite cost --json
+```
+
+`ferrite validate` checks static manifest syntax. `ferrite check` also runs
+admission checks and Rust compilation; pass `--remote` for the platform's own
+verdict. `ferrite cost` (MCP: `estimate_cost`) reports your account balance,
+the deploy fee, and each application's projected monthly cost at current rates
+without charging or deploying. Run it before your first deploy and again after
+changing any service or compute reservation; see
+[Before you deploy: what it will cost](/developers/deployments/#before-you-deploy-what-it-will-cost).

@@ -1,0 +1,162 @@
+---
+title: "Ferrite Rsx"
+shortTitle: "Rsx"
+description: "Build server-first Ferrite applications with file-convention routes, escape-safe .rsx templates compiled to plain Rust, client islands, live regions, and replay-safe actions."
+section: "Build"
+order: 7
+---
+
+Ferrite Rsx is a server-first application framework made of two parts: a compiler built into the `ferrite` CLI and the `rsx` source package vendored into your app. Routes follow file conventions under `app/`, `.rsx` templates compile ahead of time to plain Rust (with no proc-macros and no build scripts), navigation patches the page in place, caching invalidates by exact tag, and actions commit staged writes at most once per idempotency key. Interactive pieces hydrate independently as islands, and live regions stream server-driven updates.
+
+Rsx and [Alloy](/developers/alloy/) both ship with the released `ferrite` CLI and compile into a single-dependency constrained app with no ambient authority. Choose Rsx when content and templates drive the product: documentation, dashboards, feeds, and pages read by both people and agents, where compact HTML payloads matter. Choose Alloy when you want to write routing, loaders, and actions directly in Rust, or when you want a generated TypeScript contract for a React front end. Rsx renders no React and runs no TypeScript compiler, so its islands are plain JavaScript. The [TanStack Start](/developers/tanstack-start/) route relies on repository tooling outside the released CLI.
+
+## Scaffold and run
+
+Four commands take you from an empty directory to a hot-reloading app:
+
+```bash
+ferrite rsx new my-app --with-tests && cd my-app
+ferrite dev            # http://localhost:8787, hot reload on every save
+ferrite rsx check      # the generated tree matches app/
+ferrite deploy         # the platform's build, when you're ready
+```
+
+`ferrite deploy` submits your source and lets the platform check and compile it; a build typically takes three to eight minutes.
+
+`ferrite rsx new` writes the `rsx` runtime into `src/rsx/` from the copy bundled inside the CLI, so scaffolding needs no network connection (the same package is also published in the registry).
+
+The compiler owns `src/__rsx/` (your generated route table, templates, and island modules) as well as `src/lib.rs`, `src/main.rs`, and `ferrite.json`, and records every generated file with its source digests in `.ferrite/rsx.lock.json`. Never edit generated files by hand: `ferrite rsx sync` refuses to overwrite a hand-edited file at a generated path, and `ferrite rsx check` fails whenever generated output drifts from `app/`.
+
+## The compile commands
+
+| Command | What it does |
+|---|---|
+| `ferrite rsx new <name>` | Scaffolds an app, writes the runtime, and runs the first sync. `--with-tests` adds the test SDK and a starter suite; `--dir` sets the parent directory |
+| `ferrite rsx sync` | Compiles `app/` into `src/__rsx/`, the synthesized `ferrite.json`, a source map (`.ferrite/rsx/sourcemap.json`), and the lockfile, and removes generated files whose source is gone |
+| `ferrite rsx check` | Verifies that the generated tree matches its sources without writing any files |
+
+Both `sync` and `check` accept `--dir` for the app directory and `--json` for machine-readable output. `ferrite dev` runs `sync` before every rebuild so edits under `app/` hot-reload alongside edits under `src/`. Because `ferrite deploy` submits `src/` and `ferrite.json` without `app/`, run `ferrite rsx check` before deploying to confirm your submitted Rust matches your templates.
+
+Compiler diagnostics carry stable error codes such as `RSX_TEMPLATE_PARSE`, `RSX_TEMPLATE_UNDECLARED_PROP`, `RSX_TEMPLATE_UNSAFE_URL`, `RSX_ROUTE_CONFLICT`, `RSX_GENERATED_EDITED`, `RSX_GENERATED_COLLISION`, and `RSX_CONFIG_INVALID`. Run `ferrite explain <code>` to read any diagnostic offline. The compiler refuses to read or write project files through symlinks.
+
+## Declare your own planes
+
+The synthesized `ferrite.json` binds the planes the framework uses. Declare your application's own planes under `[services]` in `rsx.toml` at the app root; the next `ferrite rsx sync` adds each entry as both a service and a binding under the same handle name:
+
+```toml filename="rsx.toml"
+[services]
+posts = "store"
+uploads = "blob"
+```
+
+Valid primitives are `store`, `ape`, `queue`, `log`, `topics`, and `blob`. `ape` is APE (atomic envelope), the service behind [Transactions](/developers/transactions/), and the framework already binds an `ape` handle named `state` for actions. Handle names use lowercase letters, digits, and dashes, must begin with a letter, and cannot collide with framework-owned names.
+
+The synthesized manifest requests 256 MiB of memory and half a CPU. `rsx.toml` exposes no compute override; to change `compute` on a durable account, set `[generator] manifest = "app-owned"` and manage `ferrite.json` yourself. Run `ferrite cost` before deploying to inspect projected charges.
+
+To protect actions against cross-site request forgery, the synthesized manifest forwards `cookie`, `origin`, and `sec-fetch-site`. Every action POST must repeat the `__Host-rsx_csrf` cookie value in its body (the framework inserts that hidden field into action forms automatically), and requests carrying a foreign `Origin` header are refused.
+
+`rsx.toml` supports two additional tables:
+
+- `[server]` accepts `configure` (`"module::function"`, a hook that receives and returns the route builder), `disable_live_subscriptions` (drops the `/_live/` route; delete `app/live.rs` first), `package_modules` (vendored package mounts declared in generated `src/lib.rs`), `forward_headers` (lowercase names of letters, digits, and dashes, up to 64 characters each, appended to the `/_rsx/` and `/` routes; because the framework already forwards 13 headers there and the platform cap is 16 per route, you can add at most 3 custom names), and `egress` (at most 16 `{ handle, destinations }` entries, each listing 1 to 32 `https://` destinations).
+- `[generator]` accepts `manifest = "app-owned"` to stop `ferrite rsx sync` from regenerating `ferrite.json`.
+
+## The router is the directory tree
+
+```text
+app/
+  layout.rsx            the shell every page renders inside
+  page.rsx              /
+  data.rs               the loader for /
+  about/page.rsx        /about
+  blog/
+    layout.rsx          chrome for everything under /blog
+    page.rsx            /blog
+    [slug]/page.rsx     /blog/:slug
+  api/health/route.rs   a hand-written handler at /api/health
+  actions.rs            every mutation the app performs
+  live.rs               one renderer per live source
+  not-found.rsx         the 404 boundary
+  error.rsx             the 500 boundary
+```
+
+`[slug]` matches a dynamic segment, `[...path]` matches a catch-all, `[[...path]]` matches an optional catch-all, and `(group)` organizes files without adding a URL segment. Two files resolving to the same URL fail at compile time by name so routing precedence never surprises you.
+
+Outside `app/`, the compiler reads three locations:
+
+- `public/`: embedded static files served by path; a symlink anywhere under `public/` causes the compiler to reject the whole directory.
+- `components/<name>.island.js`: the browser half of an island, referenced in templates as `<Name client:load />`, `<Name client:idle />`, or `<Name client:visible />`. Names use lowercase letters and digits; `.island.ts` files are rejected because constrained builds include no TypeScript compiler.
+- Top-level `src/*.rs` modules (other than `lib.rs` and `main.rs`): declared automatically in generated `src/lib.rs`, so shared types such as `crate::models::Post` are directly reachable from loaders and templates.
+
+## Templates compile to escape-safe Rust
+
+An `.rsx` file combines markup with Rust expressions and compiles ahead of time into Rust that builds an escape-safe tree. No template parser or interpreter runs at request time, so template errors surface at compile time:
+
+```text
+---
+props = { posts = "Vec<crate::models::Post>" }
+
+[metadata]
+title = "Blog"
+---
+<article>
+  <h1>{ctx.param("slug").unwrap_or("?")}</h1>
+  {#if posts.is_empty()}
+    <p>Nothing here yet.</p>
+  {:else}
+    <ul>{#for post in &posts key={post.id}}<li>{post.title}</li>{/for}</ul>
+  {/if}
+</article>
+<style>
+article { padding: 1rem; }
+</style>
+```
+
+Escaping is unconditional, and the framework refuses constructs that escaping cannot make safe. The compiler rejects `<script>` elements and literal `javascript:` URLs. At render time, event-handler attributes are omitted from HTML output and unsafe URLs computed at run time become `#refused`. A trailing `<style>` block is scoped to its template and bundled into one content-addressed stylesheet.
+
+A template can reference only `ctx` and its single declared prop. Declare that prop in frontmatter (`props = { posts = "Vec<crate::models::Post>" }`) and place a sibling `data.rs` beside the page exporting `pub async fn load(ctx: &RouteCtx) -> Result<Vec<Post>, Abort>` (both types come from `crate::rsx::server`). A page with a loader must declare exactly one prop, and a page with props must have a loader; `ferrite rsx sync` rejects either mismatch with `RSX_TEMPLATE_UNDECLARED_PROP`. Only routed pages declare props; layouts and boundary pages (`not-found.rsx`, `error.rsx`) read from `ctx`. Put `props` before the `[metadata]` header so TOML keeps it at the top level instead of nesting it under `[metadata]`.
+
+Frontmatter accepts these keys and rejects unknown keys by name:
+
+| Key | Meaning |
+|---|---|
+| `props` | The single value supplied by the page's loader, written as `name = "RustType"` |
+| `allow_raw` | `true` permits `<RawHtml html={expr} />` for unescaped markup; otherwise the compiler refuses that element |
+| `[route] life` | Caches the route using a named profile (`seconds`, `minutes`, `hours`, `static`) or a number of seconds |
+| `[route] guard` | `subject` admits any signed-in user; `assurance:N` requires assurance level `N` or higher. A layout guard covers every page beneath it, and the strongest guard along the chain wins |
+| `[metadata]` | `title`, `description`, `canonical`, `robots` (strings) and `og` (a table of Open Graph properties) |
+
+The frontmatter parser also accepts `imports` and `[route] prefetch` (`shell`, `full`, or `off`), though the compiler ignores both.
+
+Alongside `{#if}`, `{:else}`, and `{#for … key={…}}`, templates support `{:else if cond}`, `{#match expr}{:case Pattern}…{/match}` with at least one arm, and `<Children />` inside layouts to mark where the nested page renders.
+
+## What the framework carries
+
+| Concern | How Rsx handles it |
+|---|---|
+| Rendering | Server-rendered HTML; islands hydrate only the interactive pockets |
+| Data loading | `data.rs` loaders that await platform planes, cached with exact tag invalidation |
+| Mutations | `actions.rs` actions whose staged writes apply at most once per idempotency key; duplicates replay the first reply |
+| Liveness | Live regions: one renderer per live source that streams server-driven updates |
+| Navigation | Same-origin clicks fetch the next route and patch the page; scroll and focus stay intact |
+| Shipped JavaScript | Islands only; pure content pages ship HTML |
+
+## What an action guarantees
+
+Queue delivery is at least once: expired leases redeliver, and browsers can retry a POST after a dropped connection. Rsx makes every action's staged writes execute at most once per idempotency key. Entries staged with `ActionCtx::commit`, an admission marker, and the recorded reply commit together in one atomic envelope guarded on the marker's absence. Exactly one delivery can win; every subsequent redelivery or retry carrying that key receives the recorded reply unchanged, errors included.
+
+The caller supplies the key. Rsx's client script generates one idempotency key per submission and reuses it on retry. A plain HTML form submitted without JavaScript carries no `idempotency-key` header, so the gateway substitutes the request's correlation id; because each HTTP request gets a fresh correlation id, resubmitting that form after a lost reply runs the action again. See [The idempotency key and the marker](/developers/alloy-actions/#the-idempotency-key-and-the-marker) for the gateway's exact behavior.
+
+Three boundaries fall outside the atomic guarantee:
+
+1. Racing duplicates can execute the handler body more than once before one wins the commit, so keep the handler body free of unguarded side effects.
+2. Writes through `ActionCtx::route()` bypass the envelope; use `route()` for reads and authorization only.
+3. Effects outside the action's `state` plane (a second store, an email, or a payment) are not covered. Rsx includes no server-side outbox, so stage a record of the intended effect alongside your action's writes and send it from your own code that tolerates running twice.
+
+Tag expiry runs on every delivery; the only cost is a cache recomputation.
+
+## Reference applications
+
+Ferrite's own Rsx applications (a music player, a feed, a team chat, and a calendar) are not published as source. Start from `ferrite rsx new` and the conventions on this page, then see [Transactions](/developers/transactions/) and [Deployments](/developers/deployments/) for atomic state and production builds.
+
+{/* The academy course "Rsx from zero" and the introduction post link here
+    again once they are selected in src/lib/publication.ts. */}

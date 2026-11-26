@@ -1,0 +1,133 @@
+---
+title: "Alloy Documents & Assets"
+shortTitle: "Documents & Assets"
+description: "How Ferrite Alloy assembles HTML documents in Rust: the shell model, head metadata, CSP nonces, escaping guarantees, the asset pipeline, and public caching."
+section: "Alloy"
+order: 6
+---
+
+On Ferrite, `IngressReply.body` is a single `Vec<u8>` and no JavaScript runs on the server, so HTML responses return as one complete buffer. Alloy builds each document in Rust by substituting `<head>` metadata and the loader payload into a static HTML shell. Crawlers receive complete metadata, and the browser gets its initial data without a follow-up fetch.
+
+## The shell model
+
+Define your HTML template as `AlloyApp::SHELL`, validated by `Shell::parse`. It requires two exact markers in this order:
+
+```html
+<!--__alloy_head-->
+<script id="__alloy_data" type="application/json"></script>
+```
+
+On a document request, Alloy replaces the first marker with the route's rendered `<head>` tags and inserts the escaped JSON loader payload inside `__alloy_data`. If either marker is missing or reversed, `Shell::parse` rejects the shell instead of serving a broken document.
+
+You supply the page body yourself. The `alloy` template leaves a body slot in `SHELL` and fills a per-request copy with HTML rendered in Rust. For pages whose markup is fixed at build time, return it from `AlloyApp::prerendered_body(route_id)` and place `<!--__alloy_body-->` in `SHELL`; the `alloy::app::document*` helpers substitute it there. Calling `Shell::parse(...).render(...)` directly, as the template's `render` helper does, skips `prerendered_body`.
+
+Per-route headers, CSP nonces, and public caching also apply only through the route-aware helpers. Use `alloy::app::document_for::<App>(req, &route, &params, data, &metadata, nonce)` (or `document_for_status`) so Alloy receives the resolved route. `alloy::app::document` and `document_status` take no route, apply no route headers, and always return `cache-control: private, no-cache`. If you assemble replies yourself, copy `route.headers()` onto the reply (replacing headers of the same name) and set `content-security-policy` and `cache-control` explicitly.
+
+In `ferrite dev` and `TestHarness`, `HEAD` requests return the exact headers a `GET` would carry with an empty body. On Ferrite Cloud, `api` routes do not forward `HEAD` and the gateway answers `405` before the request reaches your app ([Limits](/developers/limits/)).
+
+Unmatched paths return an RFC 9457 JSON problem by default. If your frontend renders an HTML not-found page, set `const NOT_FOUND_DOCUMENT: bool = true;` on `AlloyApp`. When `answer` returns `AlloyError::NotFound` for a `GET` or `HEAD` outside `/__*` whose `Accept` header includes `text/html`, Alloy renders the shell for route ID `not_found` with `{ "path": <path> }` as its data and status 404. JSON clients, loader and action requests, and `POST` requests continue receiving the RFC 9457 problem document.
+
+### Deferred data: segments, not streaming
+
+Single-buffer responses cannot flush fast content ahead of slow queries. When part of a page is slow, return a `Segmented` payload from your loader: a **ready** section embedded directly in the HTML document, plus up to 8 **deferred** sections that the client fetches after first paint:
+
+```rust
+let seg = Segmented::ready(serde_json::json!({ "title": "a page" }))
+    .defer("recommendations")?;
+```
+
+Deferred segments are announced by name inside the embedded payload so your frontend can render matching placeholders immediately and distinguish pending regions from failed ones. Each deferred segment either resolves via `resolve` or isolates an error to that region via `fail`. Routes with no deferred segments embed an unmodified payload so simple clients need no changes. Compared with HTTP streaming, each fetched segment caches independently, invalidates on its own tags, and retries on its own.
+
+## Metadata
+
+Return a `Metadata` builder beside your loader data; `render()` produces the `<head>` fragment injected at `<!--__alloy_head-->`:
+
+```rust filename="src/lib.rs"
+let metadata = Metadata::new()
+    .title(view.title.clone())
+    .description(view.body.chars().take(160).collect::<String>())
+    .og("title", view.title.clone())
+    .og("type", "article")
+    .canonical(format!("/drops/{id}"));
+```
+
+Supported fields: `title`, `title_template`, `title_default`, `description`, `canonical`, `viewport`, `theme_color` and `theme_color_dark` (rendered with `media` attributes for light and dark schemes), `icon` (favicon href), `apple_icon`, `robots`, `keywords(Vec<String>)`, `author`, plus repeatable `og(property, content)`, `twitter(name, content)`, and `json_ld(doc)`.
+
+### Title templates and parent merging
+
+`parent.merge(&child)` implements shallow merging matching Next.js rules, where any field set on the child wins. Title inheritance follows specific rules:
+
+```rust
+let layout = Metadata::new().title("Acme").title_template("%s | Acme");
+let page = Metadata::new().title("Pricing");
+let merged = layout.merge(&page);   // title: "Pricing | Acme"
+```
+
+- A child's `title` formats through the nearest parent's `title_template`, substituting `%s` with the child's title.
+- A `title_template` applies only to descendants, never to the level that defines it.
+- A child declaring its own `title_template` starts a new template chain for its descendants; omitting it inherits the parent's template.
+- `title_default` applies verbatim only when no level supplies a title.
+- `keywords` replaces the parent's list as a whole, while `json_ld` blocks append without overwriting earlier ones.
+
+## Escaping guarantees
+
+Loader payloads carry application data inside an HTML `<script>` element. HTML tokenizers scan `<script>` contents for literal `</script` and `<!--` sequences regardless of JSON structure, and literal `/` and `<` are valid JSON characters. Standard JSON escaping leaves values such as `</script><img onerror=...>` able to close the script block and run arbitrary markup.
+
+`escape_json_for_script` rewrites `<` as `\u003c`, which `JSON.parse` decodes back to `<` while staying inert to the HTML tokenizer. A payload containing `</script><script>alert(1)</script>` remains contained inside `__alloy_data` and parses back to the exact original string. Every `Metadata` field is HTML-escaped for its context (text or attribute), and non-finite floating-point numbers are refused before serialization.
+
+## CSP nonces
+
+`Shell::render_with_nonce(metadata, payload, nonce)` stamps `nonce="<nonce>"` on the `__alloy_data` script and on every `<script>` element in `SHELL`. Passing the nonce to `alloy::app::document_for` emits the matching header automatically; if you call `render_with_nonce` directly, add the header yourself:
+
+```text
+content-security-policy: script-src 'self' 'nonce-<nonce>'
+```
+
+A route header declaring `content-security-policy` overrides the nonce-derived header because route headers apply last and replace matching names. Nonce stamping is position-based, so hostile content inside the shell cannot forge an extra nonce attribute. The nonce must be non-empty base64 text (letters, digits, `+`, `/`, `=`, `-`, and `_`); anything else returns an error.
+
+## The asset pipeline
+
+`ferrite deploy` submits source files as UTF-8 text rather than raw binary artifacts, and inlining assets as data URIs bloats every HTML response. Alloy packs compiled frontend assets into your Rust crate instead. In an app with a React frontend, each `ferrite dev` build runs `npm run build` in `web/` and packs `web/dist/assets/` into `src/site_assets.rs` as an LZSS-compressed, base64-encoded archive (`ARCHIVE_B64` and `ARCHIVE_SIZE`). Wire those constants to `AlloyApp::ASSETS_B64` and `AlloyApp::ASSETS_LEN`. At startup, Alloy decodes the archive once in memory and serves `GET /assets/*` before `answer` runs, sending original bytes to the browser.
+
+Account for the archive's size at deploy time and runtime. Base64 adds roughly one third to the archived size, which counts against your uploaded source limit (32 MiB on a trial account) and compiled binary size, while the decoded archive occupies your instance's RAM limit. Compress images before building or store large media outside the packed archive; see [Limits](/developers/limits/) for current caps. Commit `src/site_assets.rs` with the rest of `src/` so every deploy carries it.
+
+Asset serving uses `AlloyApp::ASSET_PREFIX`, which defaults to `/assets/`; set it to an empty string to turn it off. Asset requests run without session checks because `<script>` and `<link>` loads may not present session credentials.
+
+During packing, Alloy pre-computes Brotli and gzip variants for every text and WebAssembly file that shrinks by at least 10%, and records which files Vite emitted with content hashes. At runtime, Alloy negotiates `Accept-Encoding` against those stored variants (Brotli, then gzip, then uncompressed, honoring `q=0`) without spending CPU on live compression. Caching headers follow the filename:
+
+- Files with a content hash in the filename receive `cache-control: public, max-age=31536000, immutable`.
+- HTML files under the asset prefix and the stable entry aliases (`/assets/entry.js`, `/assets/entry.css`) receive `no-cache` so browsers revalidate them by ETag on every request.
+- Unhashed files, such as files copied from `web/public/`, receive `public, max-age=300` followed by ETag revalidation. Import fonts and images from CSS or TypeScript instead of `web/public/` whenever possible so Vite hashes them too.
+
+Every asset response includes an `etag` (the SHA-256 of the served encoding's bytes, so each encoding has a distinct ETag), `x-content-type-options: nosniff`, a `content-type` derived from the file extension, and `vary: accept-encoding` whenever compressed encodings exist. Matching `If-None-Match` requests return 304. Configure the `/assets/` route in `ferrite.json` as an API route that forwards `accept-encoding` and `if-none-match` without cookies:
+
+```json
+{ "prefix": "/assets/", "binding": "requests", "kind": "api",
+  "forward_headers": ["accept-encoding", "if-none-match"] }
+```
+
+If you bind a blob handle named `site` (`AlloyApp::SITE`, with `ASSET_KEY_PREFIX` matching a content route's `key_prefix`), Alloy also seeds each built file into object storage under its served path at startup and skips files whose stored bytes already match. If a chosen encoding exceeds 4 MiB minus 64 KiB, Alloy falls back to a smaller encoding the client accepts; if no encoding fits, the packer warns at build time and runtime requests return a 500 problem document of type `urn:ferrite:problem:asset-too-large`.
+
+Configure Vite with content-hashed filenames for every emitted file, including the entry bundle, and enable `build.manifest` (see the [quickstart](/developers/alloy-quickstart/)). The packer reads the manifest and writes `ENTRY_JS` and `ENTRY_CSS` into `src/site_assets.rs`. Your `SHELL` keeps linking the stable `/assets/entry.js` and `/assets/entry.css` URLs; at startup Alloy rewrites those two references in `SHELL` to the hashed filenames while still serving the stable URLs (with `no-cache` revalidation) for documents cached before a deploy. Call `alloy::app::shell::<App>()` to obtain the rewritten shell for any page rendered outside the router.
+
+If the served shell references an asset filename Vite did not emit, the document still returns 200 while the missing asset returns 404 and the page loads blank. After building, verify that every asset URL in the served shell exists in `web/dist/assets/` and request each one against `ferrite dev`.
+
+Every decoder in the asset pipeline is total: malformed streams, invalid back-references, truncated archives, trailing bytes, and absurd file counts all return errors instead of panicking inside a memory-bounded process.
+
+## Public caching for Static routes
+
+Document replies default to `cache-control: private, no-cache` so a shared cache never serves one visitor's page to another. `alloy::app::document_for` and `document_for_status` emit a `public` policy only when all three opt-in conditions hold together:
+
+1. The route's render mode is `Static`.
+2. The route declares a cache life with `Route::with_cache_life`.
+3. Your `AlloyApp` implementation sets `const PUBLIC_STATIC: bool = true;` (default `false`).
+
+When all three hold, Alloy sends:
+
+```text
+cache-control: public, s-maxage=<revalidate_s>, stale-while-revalidate=<(expire-revalidate)_s>
+```
+
+`s-maxage` sets how long shared caches serve without asking your app, and `stale-while-revalidate` sets how long they keep serving stale responses while refetching. Both values mirror the server-side fresh and stale windows. A route header naming `cache-control` overrides this computed header completely.
+
+Next: [Next.js Adapter](/developers/alloy-next/).

@@ -1,0 +1,127 @@
+---
+title: "Scaling & Releases"
+description: "Scale app instances, set autoscale and compute limits, see how scaling changes the bill, inspect immutable application releases, promote deliberately, and recover through rollback."
+section: "Deploy"
+order: 4
+---
+
+Application instances hold no durable state of their own. All persistent data
+lives in the services declared in `ferrite.json`: the key-value store, queues,
+streams, object storage, and atomic envelopes. You can adjust instance counts
+without touching data, and instances that remain running do not restart during
+a scale change.
+
+## Scale an app
+
+Call the MCP `scale` tool with `{"app":"my-app","instances":3}`, or update the
+desired instance count in the application's Settings tab in the Dashboard.
+Verify the rollout with `ferrite status my-app`.
+
+A trial account lasts 48 hours, starts with $50 of credit, and caps every
+application at one instance, 256 MiB of memory, and half a CPU. While an
+application sits in a trial account, `scale` and `autoscale` above one instance
+are refused, and `set_compute_limit` above 256 MiB or 50% of one core is
+refused as well.
+[Moving the application into a durable account](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours)
+lifts those caps.
+
+Scale to zero to pause an application without deleting its services or their
+data, then scale back to one or more instances when you are ready to resume.
+While an app is scaled to zero, incoming requests wait and time out with `504`,
+and `status.last_error` may report `"placement pending"`. Both are normal. Each
+scale call advances the application's generation, as do other control verbs.
+Because the MCP `scale` tool accepts no expected generation, a late request
+overwrites a newer change; read `status` first when multiple clients operate on
+the same app. The Dashboard compares its displayed generation against the
+current one before submitting, which narrows that race window without closing
+it completely. Scaling never delivers secrets changed since the last deploy: a
+restarted process boots with the environment from its last deploy.
+
+Call the MCP `autoscale` tool with
+`{"app":"my-app","min":1,"max":4,"capacity":50}` to attach or replace a policy
+that keeps the application between `min` and `max` instances at `capacity`
+requests per second per instance. Call `set_compute_limit` with
+`{"app":"my-app","memory_mb":512,"cpu_percent":100}` to change per-instance
+memory and CPU (`100` equals one full core) without rebuilding source. The
+platform re-runs account admission, and `status` reports both the admitted hold
+and rollout progress.
+
+Compute charges scale linearly with running instances. Each placed instance is
+billed by the hour for the memory and CPU set by its compute limit, so three
+instances cost three times as much as one. An autoscale policy's `max` must fit
+within account capacity at admission time, though you pay only for instances
+actually running. Scaling to zero halts compute billing, while the services the
+app declared keep charging for reserved storage until you withdraw the app.
+Where the installation's tool list includes it, `service_costs {app}` breaks
+down what each service reserves and bills. Run
+`ferrite cost --instances <count>` or call `estimate_cost` with `instances` to
+check projected monthly charges before scaling; see
+[Deployments](/developers/deployments/#before-you-deploy-what-it-will-cost).
+
+## Inspect releases
+
+Read release records over MCP with `releases`, `environments`, and
+`deploy_history`. The Dashboard's **Releases** and **Environments** tabs display
+the same data, and **Settings** cuts, deploys, promotes, and rolls back
+releases.
+
+An application release is an immutable named snapshot of one application
+created with `cut_release`. It is separate from a platform release, which is a
+clean installation of Ferrite itself.
+
+Environments point to immutable application releases. Promotion updates an
+environment pointer and does not rebuild source. An application deployed with
+`ferrite deploy` or `deploy_source` has no releases or environments until you
+cut one, so those read tools return empty lists.
+
+## Recover
+
+Call `rollback` to switch back to the previous application artifact (a second
+`rollback` moves forward again; it toggles between the last two artifacts). For
+release-managed apps, call `rollback_release` with the exact application,
+environment, and release identifier. `rollback_release` returns `BuildStarted`
+and is polled through `build_status`, as described in
+[Deployments](/developers/deployments/#preview-and-release-verbs). In the
+Dashboard, **Rollback one generation** appears in app Settings once more than
+one generation exists, behind a typed confirmation phrase.
+
+Neither `rollback` nor `rollback_release` restores data. Both run an earlier
+build against the application's current service state, so records written and
+schema changes applied by the newer version stay in place. If the newer version
+may have written data that the earlier build cannot read, test against a copy
+first: fork the application, deploy the earlier source to the fork, and verify
+it reads the copied data cleanly. See
+[Environments](/developers/environments/#state-forks) for how forks handle
+each service.
+
+The platform parks an application when its instances crash repeatedly or fail
+during startup preparation before application code runs. `status` then reports
+`park_phase` and `park_retry_after_ms`. Fix the underlying problem, then call
+the MCP `resume` tool with `{"app":"my-app"}` to retry immediately through
+fresh account admission instead of waiting for the automatic backoff. `resume`
+returns `ParkRetryStarted` when the app is placed again, `ParkRetryBlocked`
+when admission still refuses it because of an account quota or insufficient
+balance (add credit or lower compute limits, then retry), or
+`ParkedMutationRefused` when a retry is already in progress.
+
+Running out of credit stops applications through a separate path and does not
+park them. When a durable account's balance hits zero, its applications stop
+and are held for 30 days before permanent, unrecoverable deletion along with
+their data. The platform saves each application's instance count and autoscale
+policy when it stops them and restarts them automatically once the account has
+enough credit again. You do not need to scale or call `resume` (`resume`
+returns `Error` for any application that is not parked). If you scale a stopped
+application yourself, it stays at the count you set. Trial accounts cannot be
+funded and do not enter the 30-day hold; their applications suspend when credit
+runs out. The `notifications` tool surfaces the low-balance warnings and every
+stop or deletion event; see
+[Dashboard](/developers/dashboard/#read-credit-and-usage) and
+[Understand usage and credits](/kb/guide/usage-and-credits/) for thresholds and
+recovery amounts.
+
+After any rollback or recovery, verify `status`, the public route, logs, and
+the primary user workflow. A control-plane success response confirms the
+rollout finished; it does not prove the application is healthy.
+
+Use [Logs](/developers/logs/) and [Reliability](/developers/reliability/)
+during rollouts.

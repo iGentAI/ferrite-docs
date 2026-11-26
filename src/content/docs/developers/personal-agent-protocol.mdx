@@ -1,0 +1,185 @@
+---
+title: "Personal Agent Protocol"
+description: "Publish Personal Agent Protocol (Poppy 1.0) discovery, per-operation exposure controls, exact-terms approvals, Browser Join, and structured conversations from your agent-ready Surface."
+section: "Assistants & MCP"
+order: 5
+---
+
+Personal Agent Protocol (Poppy 1.0) defines how a customer's personal agent discovers your application, verifies its identity, asks for user-consented scopes, requests explicit confirmation before consequential actions, and hands off a signed-in browser session or conversation when needed. Because `agent-ready` integrates Poppy 1.0 directly on top of your existing `Surface`, you opt in by returning a `PoppyConfig` from `PageSource::poppy()` instead of maintaining a separate protocol service.
+
+Without `PageSource::poppy()`, all `/.well-known/poppy.json` and `/poppy/*` routes return `404` and your existing agent-ready behavior stays unchanged.
+
+## Enable Poppy 1.0 on an `agent-ready` app
+
+Install or update `agent-ready`, forward the Poppy request headers in `ferrite.json`, and implement `PageSource::poppy()`.
+
+First, forward the Poppy headers on the routes your application serves (keeping each route within the 16-header `forward_headers` limit):
+
+```json filename="ferrite.json (excerpt)"
+{
+  "prefix": "/",
+  "binding": "requests",
+  "kind": "api",
+  "forward_headers": [
+    "accept",
+    "cookie",
+    "idempotency-key",
+    "mcp-protocol-version",
+    "mcp-method",
+    "mcp-name",
+    "origin",
+    "sec-fetch-site",
+    "poppy-session",
+    "poppy-version",
+    "poppy-extensions",
+    "poppy-approval"
+  ]
+}
+```
+
+When your application also accepts signed-in OAuth tokens, include `authorization` (and `dpop` if you enable sender-constrained DPoP tokens) in `forward_headers` for the API and MCP routes.
+
+Second, return a `PoppyConfig` from your `PageSource` implementation:
+
+```rust filename="src/api.rs"
+use crate::agent_ready::poppy::{
+    Alternative, AlternativeRef, ApprovalPolicy, ExcludedTask, OperationPolicy,
+    PoppyConfig, PoppyExposure, PoppyWeb,
+};
+use crate::agent_ready::well_known::PageSource;
+
+impl PageSource for Pages {
+    fn markdown(&self, path: &str) -> Option<String> { /* ... */ None }
+    fn html(&self, _path: &str) -> Option<String> { None }
+
+    fn poppy(&self) -> Option<PoppyConfig> {
+        let mut cfg = PoppyConfig::signed_out("Northlight Studio");
+        cfg.web = PoppyWeb::SignedOut;
+
+        // Require exact-terms confirmation before committing a top-level write.
+        cfg.operation_policies.insert(
+            "create_board".into(),
+            OperationPolicy {
+                exposure: PoppyExposure::Public,
+                optional_scopes: Vec::new(),
+                approval: ApprovalPolicy::Required {
+                    ttl_secs: 900,
+                    require_user_approver: true,
+                },
+            },
+        );
+
+        // Keep internal or staff-only operations off the Poppy surface.
+        cfg.operation_policies.insert(
+            "rebuild_search_index".into(),
+            OperationPolicy {
+                exposure: PoppyExposure::InternalOnly,
+                optional_scopes: Vec::new(),
+                approval: ApprovalPolicy::None,
+            },
+        );
+
+        // Document tasks the app intentionally does not offer to personal agents.
+        cfg.excluded_tasks.push(ExcludedTask {
+            task: "Permanently delete a board or task".into(),
+            alternative: Some(Alternative {
+                instructions: Some(
+                    "Archive obsolete items in the Done column instead of deleting audit history.".into(),
+                ),
+                references: vec![AlternativeRef::Web {
+                    url: "https://studio.example/".into(),
+                }],
+            }),
+        });
+
+        Some(cfg)
+    }
+}
+```
+
+With that one method in place and `agent_ready::well_known::handle_h` wired ahead of your catch-all route, your application automatically serves:
+
+- `/.well-known/poppy.json` — Poppy 1.0 discovery document validated against the protocol schema, declaring your organization, channels, auth posture, and extensions.
+- `/poppy/openapi.json` — exposure-filtered OpenAPI 3.1 catalogue omitting `InternalOnly` operations, adding OAuth `security` scopes for signed-in operations, and documenting `403` approval responses for `operations` v3 actions.
+- `/poppy/tasks` — excluded tasks, Agent Skills discovery (`0.2.0`) index with SHA-256 digests, and the feedback endpoint pointer.
+- `POST /poppy/feedback` — validated structured feedback intake (`task` up to 200 characters, `description` up to 2,000 characters), forwarded to `PageSource::poppy_feedback()`.
+- `/.well-known/oauth-protected-resource` and `/.well-known/oauth-protected-resource/mcp` — RFC 9728 Protected Resource Metadata when an OAuth issuer is configured (or `404` for signed-out apps, signaling an issuerless Company).
+
+## Control per-operation exposure
+
+Every operation declared on your `Surface` inherits `PoppyConfig.default_exposure` unless overridden in `PoppyConfig.operation_policies`:
+
+| Exposure | OpenAPI (`/poppy/openapi.json`) | MCP (`/mcp` with `Poppy-Session`) | Runtime requirement |
+| --- | --- | --- | --- |
+| `PoppyExposure::Public` | Included without OAuth `security` | Listed and callable | No OAuth token required |
+| `PoppyExposure::SignedIn { scopes }` | Included with OAuth `security` scopes | Listed and callable | Verify user OAuth token carrying all listed scopes |
+| `PoppyExposure::InternalOnly` | Omitted | Hidden from `tools/list` and refused on `tools/call` | Available only to browser or internal callers without `Poppy-Session` |
+
+Run `cfg.validate(&surface)` in a unit test to catch configuration mistakes before deploying. The validator returns typed `POPPY_*` findings if a policy references an unknown operation name, if a `SignedIn` operation names an undeclared scope, or if a disabled channel conflicts with an advertised endpoint.
+
+## Verify `Poppy-Session` headers
+
+Personal agents sign requests with a `Poppy-Session` JWT backed by a short-lived delegation (`poppy_dlg`). Use `agent_ready::poppy_verify::verify_session_request` to check the signature, request binding (`htm`, `htu`, `ath`), `sid` continuity, and session revocation:
+
+```rust filename="src/poppy_guard.rs"
+use crate::agent_ready::poppy_verify::{
+    verify_session_request, AgentKeyResolver, SessionStore, VerifyRequestInput,
+};
+
+let verified = verify_session_request(
+    &VerifyRequestInput {
+        poppy_session_header: session_header,
+        poppy_version_header: version_header,
+        poppy_extensions_header: extensions_header,
+        method: &req.method,
+        canonical_url: "https://studio.example/api/bookings",
+        expected_company_id: "https://studio.example",
+        presented_access_token: bearer_token,
+        authenticated_account_id: account_id,
+        now_secs,
+        clock_skew_secs: 30,
+    },
+    &agent_directory,
+    &session_store,
+)?;
+```
+
+- `ES256` session and delegation signatures verify directly inside your application using `ferrite_app::crypto::es256_verify` against your `AgentKeyResolver` (such as `StaticAgentDirectory` for allowlisted personal agents or a cache populated over declared egress).
+- `PS384` keys dispatch through `AgentKeyResolver::verify_ps384`, allowing hosts with an external or custom verifier to plug in RSA-PSS verification.
+- Passing `presented_access_token` enforces exact `ath` (SHA-256 access-token hash) binding, and passing `authenticated_account_id` prevents a delegated session key from crossing between two customer accounts.
+
+## Require exact-terms approvals (`operations` v3)
+
+Mark high-impact writes with `ApprovalPolicy::Required { ttl_secs, require_user_approver }` in `PoppyConfig.operation_policies`, then gate execution with `agent_ready::poppy_ops::evaluate_gate`:
+
+1. When a personal agent calls the operation without an approval, `evaluate_gate` computes a stateless HMAC-SHA256 `revision` over canonicalized terms and returns `OperationGateOutcome::ApprovalRequired(offer)`. Answer HTTP `403` with `api_approval_required_body(&offer)` (or `mcp_approval_required_result(&offer)` for MCP tools).
+2. The personal agent shows the exact terms to its user and retries with `Poppy-Approval` (HTTP) or `_meta["personalagentprotocol.org/approval"]` (MCP).
+3. `evaluate_gate` checks that the caller declared `"operations";v="3"` in `Poppy-Extensions`, verifies the revision HMAC and expiry against the current terms, declines `approver="agent"` with `403 approval_declined` when `require_user_approver` is `true`, and acquires an atomic `Performing` lock in your `OperationStore`.
+4. Once the write completes, record the result with `OperationStore::mark_performed`. Retries with the same `operation_id` replay the original response without executing the write a second time, and concurrent retries while `Performing` receive `503` with `Retry-After`.
+
+## Browser Join and Conversations
+
+`agent-ready` includes two additional Poppy 1.0 modules when your product offers a web UI or a built-in company assistant:
+
+- **3-step Browser Join (`agent_ready::poppy_browser`)** — implements `GET /poppy/browser-session`, `POST /poppy/browser-session/authorize`, and `POST /poppy/browser-session` using a single `__Host-poppy_session` cookie (`j.<nonce>` transitioning to `s.<sid>`). This avoids CSRF attacks while staying within Ferrite's single-`Set-Cookie` reply model. Add `data-poppy-user-step` attributes via `poppy_browser` constants when enabling the `browser-control` v1 extension.
+- **Conversations (`agent_ready::poppy_conv`)** — implements the §8 conversation lifecycle (`/poppy/conversations`, `/messages`, `/events`, `/handoff`, `/handoff/cancel`, `/close`), Direct Conversations, `request_id_conflict` detection, ownership enforcement, and extension-gated `links` v1, `disclosures` v1, and `operations` v3 message content.
+
+## Security and limits
+
+- **Per-Company OAuth isolation**: never share another application's OAuth issuer with your app's Poppy surface. Choose signed-out mode, your own external OAuth 2.1 issuer, or a standalone per-app issuer with [`poppy-oauth`](/developers/poppy-oauth/).
+- **Header budget**: each route in `ferrite.json` allows up to 16 `forward_headers`. Keep the `poppy-*` headers on routes that need them and omit unused headers.
+- **Key resolution**: fetching arbitrary external `client_id` metadata documents or `jwks_uri` endpoints requires declared egress or an allowlisted `AgentKeyResolver` (`StaticAgentDirectory`). Constrained applications never make undeclared outbound requests.
+- **Event delivery**: `/poppy/conversations/{id}/events` serves bounded snapshot and polling responses inside standard request/reply handlers.
+
+## Verify your Poppy surface
+
+```bash
+ferrite dev
+curl -s http://127.0.0.1:8787/.well-known/poppy.json | jq .
+curl -s http://127.0.0.1:8787/poppy/openapi.json | jq '.paths | keys'
+curl -s http://127.0.0.1:8787/poppy/tasks | jq .
+```
+
+Confirm that `InternalOnly` operations do not appear in `/poppy/openapi.json`, that `cfg.validate(&surface)` passes in your unit tests, and that `/.well-known/agent-readiness` reports no configuration gaps.
+
+Continue with [Per-app OAuth (Poppy)](/developers/poppy-oauth/) to enable signed-in Personal Agent flows, or review [Agent-ready apps](/developers/agent-native-apps/) and [Authorization](/developers/authorization/).

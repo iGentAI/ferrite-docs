@@ -1,0 +1,70 @@
+---
+title: "Rate limits"
+description: "Enforce shared route budgets with the http-route-budget package, track per-caller quotas in your store, and check gateway rate-limit status on Ferrite Cloud."
+section: "Security"
+order: 4
+---
+
+On `ferrite.cloud`, route-level rate limiting runs inside your application because the current Ferrite Core release has no route-level rate limiter in its gateway. Use the `http-route-budget` package to cap traffic per route across every replica, and use expiring store counters when you need per-caller limits.
+
+The gateway can still return `429` on its own, either when parked-request capacity fills up or when traffic trips the operator's static ingress policy (a fixed-window counter per API key or client ID). Those limits belong to platform operations rather than your application manifest.
+
+## Bound a route in the application
+
+Add the `http-route-budget` source package to enforce a shared token bucket per route using only the public SDK and an existing store binding:
+
+```bash
+ferrite add http-route-budget
+```
+
+The command vendors the package as `http_route_budget`. Call its guard immediately after decoding each request, before any cache lookup, public asset, authentication callback, or handler effect:
+
+```rust
+const ROUTES: &[http_route_budget::Rule] = &[
+    http_route_budget::Rule { route: "/api/", per_min: 600 },
+    http_route_budget::Rule { route: "/", per_min: 1200 },
+];
+if let Some(reply) = http_route_budget::guard(ctx, req, "cache", ROUTES).await {
+    return reply;
+}
+```
+
+Each declared prefix gets one token bucket in your store, shared across every replica and host alias and persisted across restarts. A bucket starts with `per_min` tokens of burst capacity and refills continuously at `per_min` per minute. In the worst case, a single minute admits nearly twice `per_min` requests: one full burst at the start followed by a full minute of refill.
+
+Behavior and limits to plan around:
+
+- An exhausted bucket returns `429` with a `Retry-After` header. An invalid rule, an unmatched route, or a missing store binding returns `503`.
+- Matching is exact against `req.route`, the matched route prefix, with no longest-prefix fallback. Add one rule for every declared route prefix that reaches the guard, or requests on omitted routes return `503`.
+- A rule table holds at most 64 rules, with each prefix capped at 512 bytes.
+- Each bucket is stored in one row under `http-route-budget/v1/` followed by the prefix, alongside the `per_min` value it was created with. Changing `per_min` for a route that already has a row makes every request on that route return `503` until that row is migrated or deleted while no replica is writing to it. Treat a rate change as a stored-data migration.
+- Every admitted request costs at least one store read and one compare-and-swap, with up to 16 attempts under contention. Include those operations when sizing your store.
+
+Because `http-route-budget` runs after a request crosses the gateway and reaches your application, rejected requests are still metered as ingress, and the guard cannot protect edge parsing, ingress bandwidth, or queue depth. Redelivered or hedged requests debit the bucket again, and one bucket is shared across all callers regardless of cookies, API keys, or headers. Inspect the `http-route-budget` package guide via the MCP `read_package` tool for its remaining limits.
+
+## Bound requests by caller
+
+For identity-aware quotas, track a counter per caller in your store with `add_expiring`, keyed by the current minute and a verified caller identifier (a session subject, an account, or an API key), and return `429` once the count exceeds your bound.
+
+The `auth` package uses this exact pattern for sign-in starts: one key per minute, incremented with `add_expiring`, set to expire two minutes later, and checked against `AuthOptions::max_starts_per_minute`. Because the gateway forwards no verified client network address, per-IP counters are unavailable; apply limits to identities your application can verify.
+
+## Authentication limits
+
+Request counters cap throughput, while authentication endpoints require dedicated account-level abuse controls:
+
+- Return the same outward response whether an account identifier exists or not.
+- Perform comparable work for unknown identifiers to prevent timing enumeration.
+- Count failed attempts per account and cap verification or reset resends.
+- Add an exponentially growing delay after repeated failures.
+- Avoid permanent lockouts that an attacker can trigger against another user.
+
+## A gateway route budget on a later Core release
+
+The Ferrite Core release running on `ferrite.cloud` accepts only `prefix`, `binding`, `kind`, `key_prefix`, `public`, `forward_headers`, and `server_streaming` on a route and rejects any other key. Putting `rate_limit_per_min` in `ferrite.json` causes manifest parsing to fail.
+
+To prevent failed builds, the CLI holds any manifest containing `rate_limit_per_min` before submission: `ferrite deploy` and `ferrite cost` both stop and explain why, with no override flag. Do not add `rate_limit_per_min` to a new manifest. If an existing manifest already declares it, keep the key while the hold stands instead of bypassing the check through raw `deploy_source`, which carries no equivalent guard.
+
+The CLI hold lifts automatically once an installation's operator publishes route-budget qualification at `/.well-known/ferrite-serving-capabilities` on the MCP host. Run `ferrite check --remote --json` to check support; its `remote` section reports `route_budget_qualified: true` once enabled. Do not treat `validate_spec` accepting the key as evidence of gateway enforcement.
+
+When enabled on a later Core release, `rate_limit_per_min` creates one shared bucket per route prefix on each individual gateway instance. Excess requests fail with `429` before they reach your application or incur ingress metering. Because each gateway holds its own bucket across all callers, that limit operates per gateway instance rather than per user or across the whole fleet.
+
+Next: add user sign-in in [Authentication](/developers/authentication/) or design retry-safe handlers in [Reliability](/developers/reliability/).

@@ -1,0 +1,71 @@
+---
+title: "Headless browser"
+description: "Render HTML, CSS, and supported JavaScript inside a constrained Ferrite app with browser-core, or wrap its bounded output as tools for an agent."
+section: "AI & agents"
+order: 4
+---
+
+Constrained Ferrite applications cannot spawn Chromium or any other subprocess. When your application or your product's agent needs rendered text, markdown, extracted links, CSS-selector matches, or layout screenshots from HTML, `browser-core` compiles straight into your Rust binary as a vendored source package with no external browser service and no `wasm-runtime` dependency.
+
+`browser-core` parses and renders HTML, CSS, and supported JavaScript in-process to produce visible text, markdown, normalized HTML, links, selector matches, and bounded PNG screenshots. It also exposes a subset of Chrome DevTools Protocol (CDP) commands over a transport your app owns, so CDP clients can drive it without Chrome.
+
+## Add browser-core to an app
+
+Install the package into your project:
+
+```bash
+ferrite add browser-core
+```
+
+Before logging in with the CLI, pass `--registry https://packages.ferrite.cloud/registry.json`; see [Packages](/developers/packages/).
+
+`ferrite add` vendors the source under `src/browser_core/`, records the dependency in `ferrite-packages.json`, and prints the module declaration to add to your crate root:
+
+```rust
+mod browser_core;
+
+use browser_core::api::{Page, PageOptions};
+
+fn render_supplied_html(html: &str) -> (String, Vec<u8>) {
+    let page = Page::load_with(
+        html,
+        PageOptions {
+            viewport_width: 1280.0,
+            ..PageOptions::default()
+        },
+    );
+    (page.markdown(), page.screenshot_png())
+}
+```
+
+`browser-core` performs no network I/O of its own. When your app accepts a URL, fetch the document through an egress handle declared in `ferrite.json`, enforce your own input and response-size limits, and pass the fetched HTML to `Page`. Your manifest's egress list stays the sole network authority; installing `browser-core` adds no outbound paths.
+
+Call `Page::links()` for links in document order, `Page::text()` for CSS-aware visible text, `Page::markdown()` for compact agent input, and `browser_core::css::query_selector_all` for selector extraction. The JavaScript runtime exposes `external_script_srcs` (so your app can prefetch `<script src>` files through its scoped egress handle and pass them to `run_page_scripts`) alongside `HostHooks` for runtime `fetch` calls.
+
+## Use it from an agent
+
+Your product's agent is part of your product, so any rendering capability it gets stays inside your app's manifest and egress boundary. On the [agent SDK](/developers/agent-sdk/), `web_fetch` returns raw converted text over a granted egress handle. When an agent needs the rendered output of a page instead, wrap `browser-core` in a custom tool: fetch the bytes through your app's `HttpTransport`, load them with `Page::load_with`, and return `page.markdown()`, `page.links()`, or a bounded PNG screenshot. Because `browser-core` runs in-process without opening sockets, these tools need no extra credentials or egress widening. If your agent also uses a search provider, keep that provider's API key in its own secret.
+
+## Limits to design around
+
+`browser-core` trades full browser compatibility for deterministic, bounded execution inside a constrained app. It is not pixel-compatible with Chromium, does not solve bot challenges, and implements a smaller JavaScript and DOM event surface than a desktop browser. Plan around four specific bounds:
+
+- `Page` renders a single HTML string with no cookies, session state, or cache between loads, so your app must carry authentication or multi-step state from one fetch to the next. The CDP facade maintains its own session with navigation history and cookies that your app can snapshot and restore, while routing every fetch through host functions you supply.
+- The CDP facade rejects navigation responses larger than 1 MiB, and direct `Page` callers must enforce their own response-size cap. The screenshot rasterizer caps its pixel buffer at 64 MiB regardless of page height and draws text with a built-in bitmap font, so screenshots capture layout structure rather than the target site's typography.
+- Pages that construct nearly all of their content through client-side JavaScript may render partially or empty. Compare `Page::text()` against expected output on your target sites before relying on it in production.
+- Treat every byte from a fetched page as untrusted input. Rendered page text passed back to a model can carry prompt injection attempts, so pair browser tools with read-only tools on any agent that reads external pages.
+
+## When the task needs a full browser
+
+Because a Ferrite app cannot launch Chromium or other local processes, delegate full-browser tasks to an external browser service over a declared egress destination with its API credential stored as an application secret. An agent built with the agent SDK can mount a remote browser service's tools through `use_mcp_connection` when that service speaks MCP revision `2026-07-28`, the only revision the SDK's MCP client supports; see [Which clients can connect](/developers/mcp-servers/#which-clients-can-connect).
+
+## Verify composition
+
+Check that the vendored package compiles cleanly under Ferrite's constraints and passes your tests:
+
+```bash
+ferrite check --json
+ferrite test
+```
+
+Continue with [Agent SDK](/developers/agent-sdk/) and [Secrets & Egress](/developers/secrets-egress/).

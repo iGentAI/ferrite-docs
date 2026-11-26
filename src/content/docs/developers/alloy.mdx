@@ -1,0 +1,177 @@
+---
+title: "Ferrite Alloy"
+shortTitle: "Alloy"
+description: "A Rust web framework for Ferrite: URL routing, tag-invalidated cached loaders, replay-safe actions, HTML documents, and an optional typed React front end."
+section: "Alloy"
+order: 1
+---
+
+Ferrite Alloy is a web framework for Ferrite applications. You write routes,
+data loaders, mutations, and your HTML shell in Rust, and Alloy handles the
+plumbing underneath: URL matching in the Next.js App Router grammar,
+tag-invalidated caching, replay-safe actions keyed by idempotency key, and
+server-rendered document metadata. If you attach a React front end, the CLI's
+built-in contract generator turns your Rust declarations into TypeScript types,
+a fetch client, and TanStack Query hooks.
+
+Alloy arrives as the `alloy` source package vendored into `src/alloy/`. Your
+`Cargo.toml` keeps one dependency (`ferrite-app`), the framework passes the
+same source gate as your own code, and it runs strictly with the handles your
+manifest declares.
+
+To scaffold and run a working app locally:
+
+```bash
+ferrite new alloy my-app --with-tests
+cd my-app
+ferrite dev
+```
+
+## When to use it
+
+Use Alloy for multi-page web applications that need cross-visitor cached
+loaders, replay-safe mutations, cross-route cache invalidation, and
+crawler-readable document metadata.
+
+- For an API, a background worker with no pages, or a single page with one form
+  or counter, write plain [Functions](/developers/functions/).
+- If you prefer writing pages as `.rsx` templates over assembling HTML strings
+  in Rust, use [Rsx](/developers/rsx/);
+  [Alloy versus Rsx](/kb/guide/alloy-vs-rsx/) compares both frameworks side by
+  side.
+- No JavaScript runs on the server and every reply is one complete buffer, so
+  pages render from Rust or in the browser (no server-side React, React Server
+  Components, or HTTP streaming).
+- Moving an existing Next.js app requires keeping the React components on the
+  client and rewriting all server logic as Rust loaders and actions; see
+  [Next.js Adapter](/developers/alloy-next/) for the mapping.
+- Alloy loaders read the key-value store by exact key and by prefix scan.
+
+## What the CLI gives you
+
+The `ferrite` CLI supports Alloy in three setups.
+
+`ferrite new alloy my-app` scaffolds a server-rendered Rust application with
+two pages, one form action that writes to the store, one cached loader shared
+by both pages, a seed function, and both `alloy` and `sha256-hmac` already
+vendored. No JavaScript build is involved; Rust renders each page into the HTML
+shell. The [Quickstart](/developers/alloy-quickstart/) walks through this
+layout end to end.
+
+`ferrite add alloy` installs the same vendored runtime into an existing Ferrite
+application started from another template.
+
+You can also declare routes and actions in Rust under `app/` and serve a Vite
+React front end from `web/`. Whenever `app/`, `web/package.json`, and
+`src/alloy/mod.rs` all exist, `ferrite dev` runs the CLI's built-in contract
+generator, executes the front end's npm build, and packs the compiled assets
+into a Rust module (`src/site_assets.rs`). The generator writes both the Rust
+route registry and contract types and the TypeScript types, fetch client,
+TanStack Query hooks, and route table, so changing a loader's signature in Rust
+causes a TypeScript compile error on the next build. No starter template
+creates this layout; follow
+[Add a typed contract and a React front end](/developers/alloy-quickstart/#add-a-typed-contract-and-a-react-front-end)
+to add `app/` and `web/` to a scaffolded app.
+
+Three tools used in Ferrite's own ported applications are outside the CLI
+distribution: the Next.js adapter (`@alloy/next`), the `alloy check` seam
+checker, and the ported example applications themselves.
+[Next.js Adapter](/developers/alloy-next/) and
+[Testing & Gates](/developers/alloy-testing/) cover what each does and what to
+use in your own project.
+
+## Feature tour
+
+| Feature | How Alloy does it |
+|---|---|
+| Routing | App Router patterns (`[id]`, `[...rest]`, groups) in a deterministic Rust route table; see [Routing](/developers/alloy-routing/) |
+| Redirects | Declarative redirects with parameter substitution, resolved before route matching |
+| Data loading | Cached Rust loaders with three freshness windows, tags, and named cache profiles; see [Data & Caching](/developers/alloy-data/) |
+| Invalidation | Tag epochs: advancing a tag is one write regardless of how many cached entries carry it |
+| Mutations | Replay-safe actions with durable result records, so a repeated key returns the first admitted answer; see [Actions & Effects](/developers/alloy-actions/) |
+| Side effects | An outbox committed atomically with the action and drained at least once |
+| Documents | An HTML shell with Rust-substituted metadata and embedded loader payload; see [Documents & Assets](/developers/alloy-documents/) |
+| Metadata | Title templates, parent merging, theme colors, icons, and robots, rendered server-side where crawlers read them |
+| Draft mode | An HMAC cookie (`__Host-alloy_draft`) that bypasses the cache on both reads and writes |
+| Security | Origin checks on actions, CSP nonces, per-route response headers, and mount-point authority |
+
+Where these docs call a record durable, an acknowledged write or outbox intent
+survives a crash, a process restart, and a redeploy of your application.
+
+## The platform facts it is built around
+
+Four Ferrite platform constraints dictate Alloy's runtime design.
+
+Every HTTP reply is a single buffer (`IngressReply.body` is one `Vec<u8>`), so
+documents cannot stream. Alloy substitutes metadata and loader payloads into an
+HTML shell, and slower data loads as deferred segments fetched after first
+paint.
+
+An atomic envelope's `commit_n_if` guards a single key. To advance multiple
+cache tags atomically alongside an action's replay marker, Alloy runs a guarded
+read-modify-write over one shared version key and packs the guard, replay
+marker, tag epochs, and action effects into one 64-entry envelope.
+
+The key-value store's TTL is a hard expiry cliff. Alloy maps only the `expire`
+window onto the store TTL and carries `stale` and `revalidate` inside the cache
+envelope to evaluate at read time.
+
+Object storage keys are chosen by the caller. Alloy seeds each packed asset
+under its served path and skips writes whose stored bytes already match.
+Long-lived caching relies on content-hashed filenames: hashed assets are served
+`immutable` for one year, HTML documents and the stable `/assets/entry.js` and
+`/assets/entry.css` aliases are served `no-cache` for ETag revalidation on
+every request, and all other assets are served `public, max-age=300` before
+ETag revalidation.
+
+## What the runtime owns
+
+Each module under `src/alloy/` owns one concern of the vendored runtime:
+
+| Module | What it owns |
+|---|---|
+| `app` | Request loop, `AlloyApp` trait, action dispatch with mount-point authority, and reply helpers |
+| `router` | Route patterns, parameter extraction, specificity ranking, and declarative redirects |
+| `tags` | Tag-epoch table: single-write invalidation over one guarded envelope in an APE (atomic envelope) binding; see [Transactions](/developers/transactions/) |
+| `cache` | Cache envelopes, three freshness windows, named profiles, and witness validation |
+| `ctx` | Cached-loader path: L1 and L2 lookup, stale-while-revalidate, single-flight, and draft bypass |
+| `actions` | Replay-safe mutations: idempotency markers, action stamps, and outbox intents |
+| `outbox` | Outbox drain: durable discovery, shard leases, and at-least-once delivery |
+| `page` | Bounded prefix scans and declared invalidation budgets |
+| `saga` | Cross-key writes as declared phases with durable resume |
+| `activity` | Ephemeral user-held state (such as drafts) expired through the store TTL |
+| `document` | Shell templates, `<head>` metadata, CSP nonces, and script-safe payload injection |
+| `segments` | Deferred portions of a loader payload fetched after first paint |
+| `draft` | The `__Host-alloy_draft` cookie that bypasses the cache for previews |
+| `assets` | Packed asset archive, digest manifest, and object-storage seeding |
+| `error` | Typed error surface and RFC 9457 problem rendering |
+
+## What is deliberately not claimed
+
+Alloy provides no user accounts or sessions of its own. Its origin check blocks
+cross-site form posts, while your `admit` implementation decides which callers
+hold an action's mounted authority and which records they may read or modify.
+Add sign-in with the `auth` package as shown in
+[Sign-in for Alloy applications](/developers/authentication-alloy/), and keep
+per-visitor data out of shared cache keys (see
+[Cached loaders and per-visitor data](/developers/alloy-data/#cached-loaders-and-per-visitor-data)).
+
+No JavaScript runs on the server. When you add a React front end, React renders
+in the browser, and any server-rendered HTML body comes from what your Rust
+code writes into the shell.
+
+Delivery guarantees depend on the effect class. APE writes committed in the
+same envelope as the replay marker apply exactly once, store writes carrying an
+action stamp apply effectively once while uncontended by another writer,
+digest-keyed object writes are naturally idempotent, and queue, egress, and
+notification outbox intents deliver at least once with a carried idempotency
+key. One action commit shares a 64-entry APE envelope: the version guard and
+replay marker use 2 entries; the remaining 62 are shared by the action's APE
+writes, tag advances, outbox intents, and pending-index entry.
+[Actions & Effects](/developers/alloy-actions/#the-guarantee-is-per-effect-class)
+details each class.
+
+Multi-tag atomicity holds within a single APE version guard and does not span
+shards.
+
+Next: [Alloy Quickstart](/developers/alloy-quickstart/).

@@ -1,0 +1,294 @@
+---
+title: "Sign-in for Alloy applications"
+shortTitle: "Sign-in for Alloy"
+description: "Gate Ferrite Alloy pages and writer actions with the auth package: propagate auth redirects through AlloyError::reply and submit CSRF-protected HTML forms without client scripts."
+section: "Security"
+order: 1.5
+---
+
+An Alloy application uses the same `auth` package and one-deploy setup as any
+other Ferrite application: manifest bindings and egress, `ferrite host`
+callbacks, OAuth client registration, secrets, and a single deploy
+([Authentication](/developers/authentication/)). This page covers the three
+Alloy-specific integration points: propagating `Auth::gate` replies through
+Alloy's `Result`, guarding `writer` actions in `AlloyApp::admit`, and
+submitting plain HTML forms that pass the CSRF check without client-side
+JavaScript.
+
+Use `auth` when your users sign in with GitHub or Google. If your Alloy app
+issues and stores its own passwords, use the separate `alloy-auth` package
+instead ([Packages](/developers/packages/)). Do not combine both packages in
+one application.
+
+The walkthrough below builds a small shop with a public catalogue and product
+pages, a gated account page, and a plain `<form method="post">` that saves a
+shipping address.
+
+## What you need
+
+```bash
+ferrite new alloy corner-shop --with-tests
+cd corner-shop
+ferrite add auth
+```
+
+`--with-tests` adds the `ferrite-app-test` development dependency used in
+[Test it](#test-it). `ferrite add` reads the package registry of the
+installation you are logged in to; before logging in, pass
+`--registry https://packages.ferrite.cloud/registry.json`. Export the package
+in `src/lib.rs` with `pub mod auth;`, as `ferrite add` prints.
+
+This integration requires `alloy` 0.5.0 or later (which adds
+`AlloyError::Reply`) and `auth` 0.5.0 or later (which accepts `_csrf` from form
+bodies). Upgrade an earlier scaffold with `ferrite add alloy --force`.
+
+Alloy's template declares three `api` routes: `/__alloy/` for actions,
+`/assets/` for application files, and `/` for pages. Both `/__alloy/` and `/`
+reach the auth gate, and the scaffold already forwards most of the headers
+`auth` reads. Add `sec-fetch-user`, `sec-fetch-mode`, and `sec-fetch-dest` to
+`forward_headers` on both routes while keeping every existing scaffold header.
+Alloy serves `/assets/` without a session, so that route needs none of these
+headers:
+
+```json
+"routes": [
+  { "prefix": "/__alloy/", "binding": "requests", "kind": "api", "public": true, "forward_headers": ["accept", "idempotency-key", "origin", "sec-fetch-site", "cookie", "content-type", "x-csrf-token", "sec-fetch-user", "sec-fetch-mode", "sec-fetch-dest"] },
+  { "prefix": "/assets/", "binding": "requests", "kind": "api", "public": true, "forward_headers": ["accept-encoding", "if-none-match"] },
+  { "prefix": "/", "binding": "requests", "kind": "api", "public": true, "forward_headers": ["accept", "cookie", "origin", "sec-fetch-site", "content-type", "x-csrf-token", "sec-fetch-user", "sec-fetch-mode", "sec-fetch-dest"] }
+]
+```
+
+If your scaffold omits `/assets/`, update `/__alloy/` and `/` the same way and
+do not add an asset route. Each route forwards at most 16 header names, so
+these lists leave room for custom headers your handlers read.
+
+Bind a session store (`{ "handle": "state", "kind": "store", "service": "state" }`)
+with a matching `store` service, and add the `egress` block from
+[Authentication](/developers/authentication/#2-declare-what-the-package-needs-in-ferritejson).
+
+## Open the package per request
+
+Two small helpers carry the integration. `open_auth` reads secrets and opens
+the `state` store, and turns missing configuration into the package's `503`
+reply naming the missing secret. `signed_in` runs `Auth::gate` and wraps any
+refusal reply in `AlloyError::reply` so you can propagate it with `?` anywhere
+Alloy expects a `Result`:
+
+```rust
+use ferrite_app::client::StoreClusterClient;
+use ferrite_app::{AppContext, IngressReply, IngressRequest};
+
+use crate::alloy::error::{AlloyError, Result};
+
+fn open_auth(
+    ctx: &AppContext,
+    req: &IngressRequest,
+) -> core::result::Result<auth::Auth<StoreClusterClient>, IngressReply> {
+    let config = auth::AuthConfig::from_secrets(ctx)
+        .map_err(|error| auth::unconfigured(req, &error))?;
+    let store = ctx.store("state").map_err(|_| {
+        IngressReply::to(req, 503, b"no store binding named 'state' in ferrite.json".to_vec())
+    })?;
+    Ok(auth::Auth::new(config, store))
+}
+
+/// The signed-in customer, or the gate's reply: a 303 to sign-in for a page
+/// load, a 401 for anything else, a 403 naming a failed CSRF check or an
+/// account the access list does not admit, a 503 naming a missing secret.
+async fn signed_in(ctx: &AppContext, req: &IngressRequest) -> Result<auth::Session> {
+    let mut auth = open_auth(ctx, req).map_err(AlloyError::reply)?;
+    auth.gate(req, ctx.now_ms()).await.map_err(AlloyError::reply)
+}
+```
+
+`AlloyError::reply` sends the wrapped `IngressReply` verbatim instead of
+rendering an RFC 9457 JSON problem document. Without it, `admit` could return
+only `Unauthorized` or `Forbidden`, and a visitor opening `/account` would
+receive JSON error output instead of a `303` redirect to `/auth/sign-in`.
+
+## Gate actions in `admit`
+
+Mount every authenticated mutation with `writer` and validate
+`Authority::Writer` in `AlloyApp::admit` with `signed_in`. Alloy's dispatcher
+checks the HTTP method and request origin, then calls `admit` before parsing
+input or running your handler, so unauthenticated requests never reach action
+code:
+
+```rust
+impl AlloyApp for Shop {
+    // BUILD, SHELL, answer and seed as the template has them.
+
+    async fn admit(ctx: &AppContext, req: &IngressRequest, authority: Authority) -> Result<()> {
+        match authority {
+            Authority::Public => Ok(()),
+            Authority::Writer => signed_in(ctx, req).await.map(drop),
+            Authority::Admin => Err(AlloyError::forbidden("the shop has no admin actions")),
+        }
+    }
+}
+
+fn actions() -> Actions<Shop> {
+    let mut actions = Actions::new();
+    actions.writer("save-address", |ctx, req| Box::pin(save_address(ctx, req)));
+    actions
+}
+```
+
+Because an action handler receives only `(ctx, req)`, call `signed_in` inside
+the handler to read the verified session and scope storage keys to
+`session.subject().key()`. `admit` already validated the request, so this
+second call returns the same session:
+
+```rust
+async fn save_address(ctx: &AppContext, req: &IngressRequest) -> Result<IngressReply> {
+    let session = signed_in(ctx, req).await?;
+    let body = core::str::from_utf8(&req.body).unwrap_or("");
+    let address = match auth::query::param(body, "address") {
+        auth::query::Param::One(address) => address.trim().to_string(),
+        _ => return Err(AlloyError::bad_request("the form carries one address field")),
+    };
+    if address.is_empty() || address.chars().count() > 300 {
+        return Err(AlloyError::bad_request("an address is 1 to 300 characters"));
+    }
+    let key = format!("customers/{}/address", session.subject().key());
+    ctx.store("state")?.put(key.as_bytes(), address.as_bytes()).await?;
+    // POST, redirect, GET: a reload does not resubmit.
+    let mut reply = IngressReply::to(req, 303, Vec::new());
+    reply.headers.push(("location".into(), "/account".into()));
+    Ok(reply)
+}
+```
+
+A raw `put` writes whichever request lands last, so a delayed retry of an
+earlier POST can overwrite a newer address. When clients retry this POST, or
+for any non-idempotent effect such as placing an order, record admission with
+`ActionRunner` so replays return the first admitted answer
+([Alloy Actions & Effects](/developers/alloy-actions/)).
+
+## Route the package, the actions and the pages
+
+Structure `answer` in three stages: send `/auth` and `/auth/*` to
+`Auth::handle` first (returning the `503` setup reply if secrets are missing),
+dispatch `/__alloy/action/` to Alloy's action table next, and resolve pages
+last. Public pages call `Auth::session` and treat missing configuration as
+`None`, so the catalogue stays up even while secrets are unset. Gated pages
+begin with `signed_in`:
+
+```rust
+async fn answer(ctx: &AppContext, req: &IngressRequest) -> Result<IngressReply> {
+    let path = req.path.split(['?', '#']).next().unwrap_or("/");
+    let now = ctx.now_ms();
+    let mut auth = open_auth(ctx, req);
+
+    if path == "/auth" || path.starts_with("/auth/") {
+        return match &mut auth {
+            Ok(auth) => {
+                let mut providers = auth::Providers::open(ctx, auth::setup::EGRESS_HANDLE);
+                match auth.handle(req, &mut providers, now).await {
+                    Some(reply) => Ok(reply),
+                    None => Err(AlloyError::NotFound),
+                }
+            }
+            Err(reply) => Ok(reply.clone()), // the 503 naming the missing secret
+        };
+    }
+    if let Some(name) = path.strip_prefix("/__alloy/action/") {
+        return dispatch_action(&actions(), ctx, req, name).await;
+    }
+    let (route, params) = resolve(req)?; // the template's route table
+    match route.id.as_str() {
+        "catalogue" | "product" => {
+            let visitor = match &mut auth {
+                Ok(auth) => auth.session(req, now).await?,
+                Err(_) => None,
+            };
+            catalogue_page(req, &route, &params, visitor.as_ref())
+        }
+        "account" => {
+            let session = signed_in(ctx, req).await?;
+            account_page(ctx, req, &route, &params, &session).await
+        }
+        other => Err(AlloyError::internal(format!("route '{other}' has no loader"))),
+    }
+}
+```
+
+## Post a plain HTML form
+
+Render `session.csrf_field()` inside each `<form method="post">`. It emits a
+hidden `<input name="_csrf">` containing the session's CSRF token, which the
+browser submits in the urlencoded POST body. `Auth::gate` accepts that field in
+place of `x-csrf-token`, so both actions and sign-out work without client-side
+JavaScript:
+
+```rust
+let body = format!(
+    "<h1>Your account</h1>\
+     <form method=\"post\" action=\"/__alloy/action/save-address\">{}\
+     <label for=\"address\">Shipping address</label>\
+     <input id=\"address\" name=\"address\" value=\"{}\" maxlength=\"300\">\
+     <button type=\"submit\">Save</button></form>\
+     <form method=\"post\" action=\"/auth/sign-out\">{}\
+     <button type=\"submit\">Sign out</button></form>",
+    session.csrf_field(),
+    escape_html_attr(&address),
+    session.csrf_field(),
+);
+```
+
+Keep `<meta name="referrer" content="same-origin">` in your document shell, as
+the Alloy template does, so form submissions always send the page's real
+`Origin` header for comparison against `auth_public_origin`. A page served with
+`Referrer-Policy: no-referrer` (which `auth` sets on its own pages) causes
+browsers to send `Origin: null`, which fails the origin check.
+
+Cross-site form posts are rejected twice: Alloy's action gate refuses them on
+`sec-fetch-site` before `admit` runs, and `auth` refuses the mismatched origin
+before checking `_csrf`. Include a live browser form POST in your first
+post-deploy check
+([What is proven](/developers/authentication/#what-is-proven)).
+
+## Test it
+
+`auth::testing` supplies test secrets and mints signed-in sessions in the test
+store so you can run the full recipe through `ferrite-app-test` and Alloy's
+real serve loop. The module exists in test and debug builds only
+([Test a signed-in page](/developers/authentication/#test-a-signed-in-page)):
+
+```rust
+let env = TestHarness::new()
+    .with_queue("requests")
+    .with_queue("replies")
+    .with_store("cache")
+    .with_store("state")
+    .with_ape("tags")
+    .build()
+    .await;
+let secrets = TestSecrets::new();
+let ctx = secrets.context(env.payload(), env.clock());
+env.run_app(move |_| crate::alloy::app::serve::<Shop>(ctx));
+
+let mut auth = Auth::new(secrets.config().unwrap(), env.store("state"));
+let me = testing::sign_in(&mut auth, &TestUser::github("583231"), env.now_ms()).await.unwrap();
+
+let account = env.handle(me.get("/account")).await.unwrap();
+assert_eq!(account.status, 200);
+let saved = env
+    .handle(me.post_form("/__alloy/action/save-address", &[("address", "1 Main St")]))
+    .await
+    .unwrap();
+assert_eq!(saved.status, 303);
+```
+
+In the same harness, assert the refusal paths as well: an anonymous
+`GET /account` receives `303` to `/auth/sign-in?return_to=%2Faccount`, an
+anonymous action receives `401`, a form missing `_csrf` or carrying another
+session's token receives `403` without writing state, a cross-site form is
+refused, and before secrets are set the catalogue still answers `200` while
+`/account` and `/__alloy/action/save-address` answer `503` naming
+`auth_public_origin`.
+
+Next: complete OAuth client and secret setup in
+[Authentication](/developers/authentication/), define per-user ownership rules
+in [Authorization](/developers/authorization/), or wire replay-safe writes in
+[Alloy Actions & Effects](/developers/alloy-actions/).

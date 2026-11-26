@@ -1,0 +1,142 @@
+---
+title: "MCP Events"
+description: "Discover application events, follow changes with polling or push, and resume safely after a disconnect."
+section: "Assistants & MCP"
+order: 4
+---
+
+MCP Events lets an agent follow state changes in an application, such as a new message, a completed job, or an updated record. Tools perform actions; events notify subscribers that something happened. When you want to track a single long-running operation and retrieve its final result, use [MCP Tasks](/developers/mcp-tasks/).
+
+## Availability
+
+Events support is experimental and targets the [Events draft SEP-3415](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/b08e4f9dd684f39d846d94089487fbeb28e666f5/seps/0000-events-extension.md) on the MCP `2026-07-28` profile. The draft can still change, and earlier polling profiles are incompatible with `2026-07-28`.
+
+Ferrite's packages implement polling, push streams, and signed webhook delivery, and each application wires them to its own event history and transport. On a hosted Ferrite application, polling is the delivery mode you can serve directly: push streams and outbound webhook delivery require host components that hosted apps do not expose, and outbound egress from one app to another app on the same Ferrite installation is refused. For that reason, the [outside-source tutorial](/developers/mcp-event-pair/) routes push and signed webhooks through an independent publisher outside Ferrite. Ferrite's own MCP endpoint serves both polling and push for your account notices.
+
+Always inspect an endpoint's advertised capabilities and event descriptors before picking a delivery mode. Endpoints without Events still serve ordinary [MCP tools](/developers/mcp-servers/). Do not retry unsupported Events methods or guess event names from tool names.
+
+## Follow your Ferrite account's notices
+
+Ferrite's own MCP endpoint (`https://mcp.ferrite.cloud/mcp`), which your coding agent uses to deploy and operate applications, serves Events for your account. Its `server/discover` response advertises `io.modelcontextprotocol/events`, and `events/list` returns one event, `account.notification`, which takes no arguments and carries `kind`, `severity`, and `source` for each account notice.
+
+A coding agent can watch `account.notification` for billing, suspension, or deployment notices, then call the `notifications` tool to read the full record; the event payload signals the change and carries no authority to act on its own. Delivery works over `events/poll` and, on HTTP with the `2026-07-28` profile, over push via `events/stream`. Every request requires your Ferrite bearer token. Calls to `events/subscribe` and `events/unsubscribe` fail with `-32026` because the platform does not deliver webhooks.
+
+## Discover what you can watch
+
+An Events-enabled endpoint advertises `io.modelcontextprotocol/events` in `server/discover`. Call `events/list` to fetch event names, their argument and payload schemas, and the delivery modes each event supports. All `events/*` operations are protocol methods, never tool names passed to `tools/call`.
+
+Download the [JavaScript Events client](/examples/mcp-events/events.mjs) and [watch example](/examples/mcp-events/watch.mjs) into the same directory. Both use native `fetch` on Node.js 22 or newer with no npm packages to install:
+
+```bash
+curl -fsS https://docs.ferrite.cloud/examples/mcp-events/events.mjs -o events.mjs
+curl -fsS https://docs.ferrite.cloud/examples/mcp-events/watch.mjs -o watch.mjs
+node watch.mjs https://your-app.example/mcp
+```
+
+To test against a live source right away, point `watch.mjs` at `https://mcp.ferrite.cloud/mcp` with your token in `FERRITE_TOKEN`.
+
+With only an endpoint URL, `watch.mjs` prints the advertised event descriptors. Pick an event name from that list and pass it to start watching. When an endpoint requires bearer authentication, set `FERRITE_TOKEN` in your environment; `watch.mjs` attaches it to the `Authorization` header and never prints it:
+
+```bash
+node watch.mjs https://your-app.example/mcp your.advertised.event '{}'
+```
+
+The optional third argument is a JSON object matching the event's argument schema. `watch.mjs` uses push when the event advertises it and falls back to polling otherwise. Press Ctrl-C to close the connection. The script prints occurrences, warns on history gaps, and keeps its cursor in memory so restarting it starts a fresh watch.
+
+## Poll, push or receive a webhook
+
+| Mode | Use it when | Client responsibility |
+| --- | --- | --- |
+| Polling | The endpoint supports request/response reads | Call `events/poll`, process the batch, then store its cursor. Follow `nextPollMs`; drain immediately while `hasMore` is true. |
+| Push | The endpoint advertises a working POST stream | Hold `events/stream` open, process notifications, and reconnect from the last processed cursor after a disconnect. |
+| Webhook | The endpoint advertises callbacks and you have an HTTPS receiver | Subscribe, verify signed deliveries, and refresh before the subscription expires. |
+
+Passing a `null` cursor starts watching from the current head. A `truncated: true` flag means earlier history is no longer available, so read the application's current state to reconcile before processing new events. Treat cursors as opaque strings bound to the same account, event name, and arguments. Persist each processed occurrence alongside its cursor, and deduplicate event IDs within the subscription so a replay never applies the same side effect twice.
+
+Push delivery uses an HTTP `POST` request with a streaming response; browser `EventSource` sends `GET` and cannot consume `events/stream`. Closing the stream ends observation without cancelling any underlying build, payment, or application job.
+
+Webhook delivery uses `events/subscribe` and `events/unsubscribe`. Ferrite's webhook component caps subscription lifetimes at five minutes, so consumers must refresh before expiry. Your receiver must answer the signed verification challenge, validate each raw request body, timestamp, and signature with Standard Webhooks before parsing or acting on it, and acknowledge delivery only after durable storage succeeds. Retries keep the original message ID and must remain idempotent.
+
+## Build an emitting and receiving pair
+
+The [complete tutorial](/developers/mcp-event-pair/) walks through deploying a Ferrite emitter, a Ferrite receiver, and an independent Cloudflare Worker publisher in your own accounts. It exercises incremental streaming, reconnection, durable deduplication, and signed webhook callbacks with downloadable source and concrete verification checks.
+
+A Ferrite app can consume any declared external MCP source over egress, whereas direct egress back into the same Ferrite fleet is refused. In the tutorial, the Ferrite emitter serves its own history over polling and publishes outbound to the external Cloudflare Worker, which keeps history and serves push streams and signed webhooks to the Ferrite receiver.
+
+## Receive a stream inside a Ferrite app
+
+A Ferrite application can hold an authenticated outbound stream to an external Events source and process occurrences incrementally. Add the `mcp` package, declare the source URL in your manifest's egress destinations, and store the source credential in Ferrite secrets. The target event must advertise `push`.
+
+The Rust client exposes `mcp::events::EventsStream` over an `EgressHandle`. Construct a `StreamRequest` with a fresh numeric request ID, the advertised event name, its argument object, and your last committed cursor. Open the stream with `EventsStream::open(&mut egress, endpoint, &request, bearer).await` and read frames with `stream.next().await`. The client validates frame size, JSON-RPC correlation, event name, and sequence before returning each notification.
+
+Handle each notification kind explicitly:
+
+| Kind | Application action |
+| --- | --- |
+| `active` | Establish the cursor. If `truncated` is true, reconcile with the source's current state before applying subsequent events. |
+| `event` | Validate `data` against the advertised payload schema. Commit the business effect, occurrence ID and cursor in one durable transaction. |
+| `heartbeat` | Record liveness. Advance observation only after all preceding occurrences are durably processed. |
+| `error` | Record the error and apply a bounded retry policy appropriate to its code. |
+| `terminated` | Stop this subscription and resolve the reported permission, expiry or administrative condition. |
+
+The client forwards repeated occurrences so your application can deduplicate cleanly across reconnects and restarts. Key your deduplication table on source, principal, event name, canonical arguments, and occurrence ID, because distinct sources can emit matching occurrence IDs.
+
+Open each connection attempt with a fresh `EgressHandle`. Drop the stream and its handle to stop watching. On reconnect, use a new request ID and the last cursor committed atomically with your business effect, apply bounded backoff to transport errors, and stop retrying when credentials are revoked. A clean final response ends the stream; an unexpected disconnect surfaces as a transport error. `EventsStream` bounds the opening request to 30 seconds, each subsequent protocol message to 60 seconds, and buffered SSE data to 1 MiB, though host egress timeouts may close an idle connection sooner.
+
+Drive durable stream workers from stored subscription state outside incoming HTTP handlers. Persist desired state, latest committed cursor, last error, next retry time, and a subscription generation counter. Checking the generation before committing prevents a slow, stale connection from writing after a user edits or stops the watch. When multiple replicas can run the worker, guard ownership with a lease or compare-and-swap update.
+
+## Receive webhooks inside a Ferrite app
+
+Expose a public HTTPS `POST` route and forward `webhook-id`, `webhook-timestamp`, `webhook-signature`, and `x-mcp-subscription-id` to your handler. Generate a separate signing secret for each subscription. Verify the timestamp and signature over the unmodified raw request body before parsing the JSON envelope; the `agent-ready` package provides `event_webhook::verify` for this check.
+
+Record the pending subscription locally before calling `events/subscribe` so the sender's signed verification challenge matches a known record during registration, then return the challenge in JSON after signature verification succeeds. On each signed occurrence, commit the deduplication key, business effect, and cursor before returning a 2xx response. Return an error if the durable write fails so the sender retries, and return success on duplicate deliveries whose effect is already committed.
+
+Save the `refreshBefore` timestamp from the subscription reply and refresh before that deadline using the same source, principal, event, arguments, callback URL, and secret. Calling `events/unsubscribe` stops future deliveries; mark the local subscription record as revoked so late or retried callbacks cannot produce new effects. If a subscription lapses, reconcile against the sender's retained history and handle any gap before resuming.
+
+## Run a Node webhook receiver
+
+Download the [webhook example](/examples/mcp-events/webhook.mjs) alongside `events.mjs` to run a local receiver and manage subscriptions:
+
+```bash
+curl -fsS https://docs.ferrite.cloud/examples/mcp-events/webhook.mjs -o webhook.mjs
+export WEBHOOK_SECRET="whsec_$(openssl rand -base64 32)"
+node webhook.mjs receive ./event-inbox
+```
+
+Share `WEBHOOK_SECRET` between the receiver and the subscribe command through your secret store. Route your public HTTPS ingress for `/events` to loopback port `8787` (or set `PORT` to override it) and point the inbox at a durable directory. The receiver verifies signatures and timestamps, answers the consent challenge, and flushes each delivery atomically to disk before acknowledging it; retries map to the same filename. Your application reads inbox files separately and commits business effects and cursor progress.
+
+From another terminal, subscribe with the same secret, the advertised event name, your public callback URL, and a JSON arguments object:
+
+```bash
+node webhook.mjs subscribe https://your-app.example/mcp your.advertised.event https://your-receiver.example/events '{}'
+node webhook.mjs unsubscribe https://your-app.example/mcp your.advertised.event https://your-receiver.example/events '{}'
+```
+
+`subscribe` requests a five-minute lifetime, prints the server's response, and exits. Re-run it before expiry with the same principal, event, arguments, callback URL, and secret to refresh; existing subscriptions keep their acknowledged cursor across refreshes. Your scheduler owns periodic refreshes and recovery after missed renewals. Following an outage, reconcile application state and set `EVENTS_CURSOR` to your last durably processed cursor when creating a replacement subscription. Keep the same `WEBHOOK_SECRET` and inbox directory across receiver restarts.
+
+Because `webhook.mjs` binds to loopback and writes to the local filesystem, use it for a Node service behind HTTPS ingress. Hosted Ferrite apps should verify deliveries and write state against their own durable store as described above. Confirm that a real occurrence reaches your receiver after the consent challenge, and unsubscribe when the consumer shuts down.
+
+## Add Events to your own app
+
+Use the `agent-ready` package to declare events alongside your application's tools. Implement `PageSource::events()` for event descriptors and `poll_event()` to read authorized event history. The `events::poll_snapshot` helper builds bounded batches and cursors from stable occurrence IDs over a retention window. Scope every read to the authenticated principal and recheck authorization on each request.
+
+Start with polling. Advertise `push` only after your host mounts `PushStream` on a `POST`-stream transport and stops its producer when clients disconnect. Advertise `webhook` only after mounting `WebhookHost` with an independent scheduler that validates HTTPS destinations on every attempt, refuses redirects, enforces bounded retries, and requires verified receiver consent. Leave unmounted modes out of discovery.
+
+See [Agent-ready apps](/developers/agent-native-apps/) for the shared operation model and [WebMCP](/developers/webmcp-openapi/) for browser-side tools.
+
+## Connect to another publisher
+
+Get the publisher's endpoint and authentication details, call `server/discover` and `events/list`, choose an advertised delivery mode, and validate your arguments against its schema. Some experimental servers expose a top-level `events` capability instead of `extensions["io.modelcontextprotocol/events"]`, so record which profile the publisher advertises before testing against it.
+
+For example, Skmtc publishes API-revision changes at `https://mcp.skmtc.dev/mcp` and advertises `dev.skmtc.api.revision.v1` over webhooks with an `api` argument such as `stripe/spec3`. Always discover its catalogue first to confirm current event names and schemas; occurrences fire when a tracked public API revision changes. See the [Skmtc Events guide](https://docs.skmtc.dev/docs/mcp-events) for callback setup and subscription lifetimes.
+
+WebMCP registers JavaScript tools inside a browser page; for remote event subscriptions, connect to an endpoint advertising the MCP Events extension and your required delivery mode. See the [WebMCP guide](/developers/webmcp-openapi/).
+
+## Handle failures explicitly
+
+- On a history gap (`truncated: true`), reconcile current application state before resuming automated actions.
+- On revoked or expired credentials, halt delivery and reauthenticate through the normal flow; never reuse one account's cursor under another account.
+- On connection drops, reconnect from the last committed cursor instead of repeating a mutation whose notification was missed.
+- Treat event payloads as untrusted application data, never as instructions authorizing further actions.
+
+When an agent consumes an Events endpoint, discover capabilities first, pick an advertised delivery mode, validate arguments against the schema, and surface unsupported modes explicitly; a working `tools/call` response implies nothing about Events support.

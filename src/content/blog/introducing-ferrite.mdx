@@ -1,0 +1,163 @@
+---
+title: "Introducing Ferrite"
+description: "Ferrite is where what your coding agent builds goes to live: declared capabilities in ferrite.json, one dependency, dual surfaces for people and their assistants, and a prepaid budget you know before deploying."
+date: 2026-09-21
+category: product
+authors: ["Ferrite Team"]
+featured: true
+---
+
+A founder who wants to put a yoga studio's timetable online already knows the
+product specification before any code exists: class schedules, seat counts,
+notice windows, and waitlist promotion rules. Claude Code, Codex, or Cursor can
+turn that specification into working software in an evening. Getting that
+software in front of real customers is where momentum dies, because production
+still assumes a human team willing to wire together IAM policies, a managed
+database, an authentication vendor, webhook verification, an unreviewed
+dependency graph, and an open-ended cloud bill.
+
+Ferrite is where what your coding agent builds goes to live. Every application
+receives capability handles only for the resources declared in `ferrite.json`,
+spends only from a prepaid balance set before traffic arrives, and exposes a web
+interface and an assistant interface from the same code. The platform is safe by
+construction, for every application, by default, with nothing to assemble. You
+paste one instruction into your coding agent, review what the application will
+cost each month, and let the agent build, deploy, and operate the product while
+you focus on customers.
+
+## One instruction from idea to production
+
+Pointing a coding agent at Ferrite's setup document installs the CLI, adds
+Ferrite's working skill, and connects the agent over MCP (`ferrite mcp-serve`,
+or the hosted endpoint's roughly seventy tools via the CLI installer's bridge)
+for static admission checks, cost estimation, deployment, log inspection, and
+release rollback. Credentials remain inside the toolchain and never pass
+through chat history. When you do not yet have an account, the agent opens a
+48-hour trial account with $50 of credit and no card required. Because the agent
+queries live platform documentation and metered pricing before writing code, you
+see a realistic monthly cost estimate before any infrastructure runs.
+
+Structured errors keep the loop autonomous. When Ferrite rejects a manifest or
+source file, the refusal returns a stable violation code, the offending
+location, and the exact remediation path so the agent fixes the issue and
+redeploys on its own. Network interruptions during a deploy reconcile cleanly
+against the same attempt, and the agent reports back once the new release is
+serving live traffic alongside the link to claim ownership of the account.
+
+## One manifest, one dependency, built-in primitives
+
+Your coding agent submits a Rust crate paired with `ferrite.json`, a short
+declaration naming the application's storage bindings, transactions, queues,
+streams, object storage, HTTP routes, and outbound destinations. Admission inspects the
+source against that declaration, compiles the crate, provisions the requested
+primitives, and attaches HTTPS routing automatically. Deployed code may depend
+on a single crate, `ferrite-app`, which eliminates transitive supply-chain drift
+and ensures the admission gate reads every line that will execute.
+
+Storage transactions commit related records atomically, so concurrent callers
+cannot oversell the final seat in a class and duplicate form submissions resolve
+to one booking. Higher-level product capabilities install as audited source
+packages right into your project directory. Running `ferrite add auth` adds
+Google and GitHub sign-in backed by sessions in the application's own store;
+the payments package manages Stripe-hosted checkout and verifies signed
+webhooks; the messaging package delivers outbound mail through Resend or
+Postmark. Model calls run through Ferrite's AI gateway on the same prepaid
+balance as compute and storage, and agents embedded inside the product version,
+deploy, and roll back with the application itself.
+
+## Capability security without manual assembly
+
+Coding agents produce more code than any founder or principal engineer will
+audit line by line, yet `ferrite.json` stays compact enough to read in thirty
+seconds. At runtime, Ferrite hands the process capability handles for declared
+resources and withholds ambient authority altogether: no filesystem, no
+environment variables, no subprocess execution, and no direct network sockets.
+Every outbound HTTP call traverses Ferrite's egress gateway and must match a
+declared URL prefix, while application secrets are write-only and cannot be read
+back through any dashboard or API.
+
+Because the manifest defines the whole reachability boundary, adding an email
+provider later shows up in code review as one outbound URL prefix and one secret
+name. A logic mistake in generated code cannot exfiltrate credentials or contact
+an undeclared host. Application-level permissions stay explicit in your own
+handlers, built on tested helpers from the authentication package; the
+[authorization guide](/developers/authorization/) details how to enforce subject
+and role checks, and the [security page](https://ferrite.cloud/security)
+documents the admission gate and runtime containment model.
+
+## Prepaid economics with a hard ceiling
+
+Cloud bills fail founders when an infinite retry loop or unexpected traffic
+spike discovers an uncapped credit card overnight. Ferrite meters compute,
+storage, requests, completed deploys, and AI gateway traffic against a prepaid balance that you
+control up front, with no monthly plan fee and no per-seat charge. Before
+deploying, your agent asks the platform for a projected run rate; a small
+always-on application costs about $8 a month.
+
+Spending stops at the balance you loaded. A misbehaving agent loop at two in the
+morning exhausts only what you allocated, and failed builds, rejected deploys,
+and previews cost nothing. Email warnings arrive ahead of depletion so topping
+up keeps production running without interruption. New durable accounts start with a
+$50 welcome credit, and the [pricing page](https://ferrite.cloud/pricing)
+publishes every metered unit rate alongside worked examples.
+
+## Live forks and single-request rollback
+
+Production work begins after the first URL goes live. Every deployment advances
+to a new generation while keeping the previous artifact on standby, and teams
+using the release workflow can cut immutable named releases and promote them
+across environments. The agent that built the product inspects logs, error
+rates, and usage metrics through the same MCP tools it used to ship, and
+reverting a regression takes a single rollback request.
+
+Riskier migrations benefit from real data before customers see them. Your agent
+can create a live fork of the application along with its current state, test a
+new reminder schedule or schema migration against real bookings on an isolated
+URL, and promote the change only after verification passes. Staging and
+production remain strictly separated, and the source stays as standard files in
+your repository so any coding agent can pick up maintenance months later.
+
+## Serving people and their assistants from one declaration
+
+Software deployed on Ferrite treats external AI assistants as first-class
+callers without splitting the codebase in two. An application declares each
+customer operation once, specifying its name, HTTP route, description, and input
+schema. From that single declaration, the application serves discovery
+documents, an OpenAPI catalog, MCP tools, and HTTP endpoints backed by the exact
+same handlers as the browser UI.
+
+Sharing one execution path keeps business invariants intact when contention
+hits. When a customer asks an assistant to book a Saturday morning class at
+Northlight Yoga, that request passes through the same compare-and-swap seat
+accounting and idempotency checks as a click on the booking page. If the last
+seat is gone, the assistant receives a structured conflict and proposes another
+time; if a network timeout triggers a retry, the store returns the original
+booking cleanly. The same single-declaration architecture runs across our
+reference applications: Acme Store handles catalog search, persistent carts,
+and checkout, while NextBooks indexes about 1.4 million books with faceted
+search and detail views for human readers and assistants alike.
+
+## A permanent home beyond agent previews
+
+Hosted sandboxes built into coding agents work well for sharing an afternoon
+prototype behind a vendor login. Once an application needs its own domain,
+transactional storage, queues, isolated environments, instant rollback, a
+declared egress policy, and an account you own outright, it outgrows a preview
+container. Ferrite gives agent-built software durable production infrastructure
+that stays native to the coding agents maintaining it.
+
+## Start with your coding agent
+
+Paste the prompt below into Claude Code, Codex, or Cursor, then describe the
+product you want to ship:
+
+> Read the Ferrite setup document at https://dashboard.ferrite.cloud/agent-setup/SKILL.md and follow it to set yourself up. Then explain to me in plain words what Ferrite is and what my application would cost a month to run there. After that, build on Ferrite whatever I ask for, deploy it, and give me the live link and the link to claim the account.
+
+The 48-hour trial includes $50 of credit, and a small application uses roughly
+50 cents of it while you test. If you want a short end-to-end verification
+before starting your own product, the [quickstart](/developers/quickstart/)
+walks your agent through deploying a persistent live counter and confirming
+state survives reloads. You can also follow platform updates on the
+[early access page](https://ferrite.cloud/early-access) or
+[write to the Ferrite team](/kb/guide/get-help-from-the-ferrite-team/) with a
+workflow you want customers' assistants to execute on your product.

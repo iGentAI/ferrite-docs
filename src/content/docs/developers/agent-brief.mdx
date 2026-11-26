@@ -1,0 +1,20 @@
+---
+title: "Agent brief"
+shortTitle: "Agent brief"
+description: "The ten operational rules an agent needs before building on Ferrite: cost disclosure, the build loop, dependencies, tests, secrets, sign-in, deploys, docs, limits, and trials."
+section: "Get started"
+order: 0.5
+---
+
+FERRITE BRIEF. With a shell, use the CLI path below.
+
+1. Before building, tell the user what Ferrite is (each app reaches only what `ferrite.json` declares) and what the app costs (`ferrite cost`, MCP `estimate_cost`).
+2. `ferrite new alloy <name>` for HTML pages (`hello` for an API), edit `src/lib.rs`, then `ferrite check`, `ferrite test`, `ferrite dev`, `ferrite deploy`. CLI and MCP share one account; never provision another. Without a shell: `validate_spec`, `code_gate`, one `deploy_source`, poll `build_status`.
+3. Safe Rust, one dependency: `ferrite-app`. Shared source: `ferrite add <package>`, or MCP† `list_packages`, `read_package`, then `deploy_source` with `packages`. Randomness: no `ferrite_app::crypto::random_*`; use `sha256-hmac` or `hmac_sha256(&Ed25519SigningKey::generate_pkcs8(), label)`.
+4. Test shipped logic with `#[test]` against known answers; `ferrite test` must show them passed.
+5. Secrets: `printf %s "$VALUE" | ferrite secrets set <NAME>` (MCP: `set_secret`) before deploying; the app reads them at runtime. Never put credentials in source.
+6. App users: `ferrite add auth`, then read `src/auth/SETUP.md`. `ferrite host` (MCP `app_host`†) prints the address first; set every secret `SETUP.md` lists, then deploy once. Get OAuth credentials from the user; never invent them.
+7. Deploy once with a long timeout; builds take minutes and draw credit. `ferrite deploy resume` reattaches.
+8. Docs: `search_docs "<words>"`† finds sections for `read_docs` († if present in `tools/list`).
+9. Limits: 256 KiB body, one `set-cookie` per reply, 8 s API deadline, ~1 MiB egress reply.
+10. Trials: keep `token` and `claim_token` private. Dashboard sign-in: `owner_status` and `claim_url`. To keep apps past expiry, read `mcp-only-operations`.
