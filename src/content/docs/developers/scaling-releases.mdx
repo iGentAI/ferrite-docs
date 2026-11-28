@@ -101,7 +101,7 @@ the MCP `resume` tool with `{"app":"my-app"}` to retry immediately through
 fresh account admission instead of waiting for the automatic backoff. `resume`
 returns `ParkRetryStarted` when the app is placed again, `ParkRetryBlocked`
 when admission still refuses it because of an account quota or insufficient
-balance (add credit or lower compute limits, then retry), or
+balance (check your balance and the application’s compute limits before retrying), or
 `ParkedMutationRefused` when a retry is already in progress.
 
 Running out of credit stops applications through a separate path and does not

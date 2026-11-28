@@ -47,7 +47,7 @@ Every app is ready for AI assistants from its first deploy. Each operation is de
 
 Ferrite draws from a prepaid balance at metered rates and quotes every deploy before you ship. There is no plan fee and no seat fee. A small always-on app costs about $8 a month. Refusals and failed builds are free. When a balance reaches zero, apps stop, stay stored for 30 days, and are then deleted with their data.
 
-On Ferrite Cloud a trial starts with $5 of credit, enough to run an app or a few for 48 hours, with no account and no card. Signing in keeps the account and its apps, and more credit is bought in the Dashboard. Once the app is specified, run `ferrite cost --instances 1` in its directory (MCP: `estimate_cost`) and report the deploy fee and the monthly estimate. The platform's quote is the price.
+On Ferrite Cloud a trial starts with $5 of credit, enough to run an app or a few for 48 hours, with no account and no card. Signing in keeps the account and its apps. Once the app is specified, run `ferrite cost --instances 1` in its directory (MCP: `estimate_cost`) and report the deploy fee and the monthly estimate. The platform's quote is the price.
 
 ## Terminal agents
 
@@ -204,7 +204,7 @@ The claim link of a trial opened this way attaches an owner but keeps the 48-hou
 
 ## Connected agents
 
-Call `account` first. On a connection that has not signed in yet, that call makes the client open Ferrite's connect page (the two choices under **Add the remote server**); once it answers, it names the account this connection acts as. Never call `provision` or `provision_ephemeral` on a connection that signs in through the browser, and do not install the CLI. Build with the Ferrite server's own guidance (its instructions and `read_docs {"doc":"page-app-starter"}` for a small web app), report the cost with `estimate_cost` first, deploy with `deploy_source`, and follow `build_status` until it serves.
+Call `account` first. On a connection that has not signed in yet, that call makes the client open Ferrite's connect page (the two choices under **Add the remote server**); once it answers, it names the account this connection acts as. Never call `provision` or `provision_ephemeral` on a connection that signs in through the browser, and do not install the CLI. For a small web app, use the [page-app starter](https://docs.ferrite.cloud/agent-setup/ferrite/starters/page-app.md) for the browser page, OpenAPI and MCP routes. Clients limited to Ferrite tools can read the store-backed form example with `read_docs {"doc":"page-app-starter"}`. Report the cost with `estimate_cost` first, using the same spec and planned instance count. Submit `deploy_source` once and follow `build_status {build_id, wait_s: 50}` until it reports `deployed`, `rejected`, `failed` or `stuck`. If the tool omits `wait_s`, poll every five seconds. On success open the returned host and verify the app. On failure report its reason.
 
 A browser sign-in makes this connection one entry under **Connected agents** in the person's Dashboard. That is where they move it to another account they own or revoke it. To start a fresh trial or sign in to a different account, they disconnect Ferrite in the client (or revoke it there) and connect again, choosing on the connect page. Tell the person this when they ask to switch accounts, start over or disconnect; never provision, claim or edit configuration to do it. After a move, a keep or a revoke, the next call can be refused once while the client renews its sign-in: call `account` again, and if the client shows a sign-in button instead, the person presses it.
 
@@ -214,14 +214,14 @@ When the person mentions an existing Ferrite account, wants to keep the work, wa
 
 The link opens the Dashboard. After Google or GitHub sign-in, on a trial started by the CLI or a connector, it offers two choices:
 
-- **Keep this as my account**: the trial becomes a permanent account of their own, with the same apps, URLs and data, and the 48-hour deadline is gone; more credit is bought in the Dashboard. Its ID changes from `eph-…` to a readable one. Every connected agent and every CLI login of the trial follows to it automatically.
+- **Keep this as my account**: the trial becomes a permanent account of their own, with the same apps, URLs and data, and the 48-hour deadline is gone. Its ID changes from `eph-…` to a readable one. Every connected agent and every CLI login of the trial follows to it automatically.
 - **Move it into** an account they already own: the apps move into that account with their URLs and data, and every connected agent and CLI login follows, so your next call already acts as their account.
 
 The link works once and expires after 24 hours; share it only with the person, and never extract its `web_token` or build a link from a claim secret. After they finish, call `account` and `owner_status` (or run `ferrite account --json`, which moves this computer's login to the new account by itself) and use the new account ID from then on. Through `mcp-serve`, one call may answer `TRIAL_LOGIN_FOLLOWED`; repeat it. If an owner is already linked, every other agent joins by signing in: `ferrite login --sign-in` on a computer with the CLI, or **Sign in to your Ferrite account** on the connect page of any connector or remote server.
 
 A client that holds a trial's claim token and cannot hand a link to a person moves its apps with the `claim` tool instead: follow `https://docs.ferrite.cloud/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours`.
 
-To add credit to a durable account, call `billing_portal` and give the person its `topup_url`, or send them to Dashboard **Usage & billing**; never pay on their behalf.
+Check **Usage & billing** for the account balance. Trials cannot receive additional credit. After claiming a trial or signing in to a durable account, check whether **Usage & billing** offers checkout. If purchasing is disabled on Ferrite Cloud, the owner can [contact Ferrite support](https://docs.ferrite.cloud/kb/guide/get-help-from-the-ferrite-team/) with the durable account ID.
 
 ## Finish the job
 

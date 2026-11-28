@@ -73,11 +73,11 @@ what happened.
 ### `ferrite deploy` is refused with `INSUFFICIENT_CREDIT`
 
 The account balance cannot cover the deploy fee, so no build started and
-nothing was charged. Check the balance with `ferrite statement`. On a durable
-account, claim ownership first if unclaimed, then add credit in the dashboard.
-On a trial account, sign in through its claim link to keep it first, then add
-credit, as covered in
-[Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
+nothing was charged. Check the balance with `ferrite statement`.
+Trials cannot receive additional credit. To keep the apps,
+[claim the trial account](/kb/guide/claim-an-agent-created-account/). For a durable account,
+check **Usage & billing**. When purchasing is disabled on Ferrite Cloud,
+[contact Ferrite support](/kb/guide/get-help-from-the-ferrite-team/) with the durable account ID.
 Do not create a new account to bypass the refusal.
 
 ### The deployed studio or the whole account is gone

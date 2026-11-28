@@ -1,8 +1,8 @@
 ---
-title: Understand usage and credits
-description: How Ferrite prepaid balances work, how to check deploy and runtime costs with estimate_cost, what happens at zero balance, and how to add credit.
+title: Pricing, usage and credits
+description: Check app pricing with estimate_cost, read charges on your statement, and find billing support when credit purchases are disabled.
 topics: ["billing", "accounts"]
-updated: 2026-11-16
+updated: 2026-11-28
 ---
 
 Every Ferrite account runs on a prepaid balance. Deployments always draw from it, and an installation can also meter running apps, requests, and reserved service data. When the balance cannot cover a paid operation, the platform refuses the work instead of extending credit.
@@ -18,11 +18,11 @@ Every surface reads the same account ledger:
 - In the dashboard, click **Usage** in the account navigation to view the balance on **Usage & billing**.
 - Ask your agent to call `account_statement` for a ledger history: current balance, total charged, total funded, and one row per charge or funding event with the resulting balance.
 
-A new trial account on Ferrite Cloud receives $5 of credit, enough to run an app or a few for 48 hours. There is no welcome credit: a durable account, including one created with `ferrite login --id` or `provision`, starts without credit, existing accounts keep their current balance, and more credit is bought (see [Add credit](#add-credit)). Check the balance on **Usage & billing** or through `account` before deploying.
+A new trial account on Ferrite Cloud receives $5 of credit, enough to run an app or a few for 48 hours. There is no welcome credit: a durable account, including one created with `ferrite login --id` or `provision`, starts without credit, and existing accounts keep their current balance. To find out whether you can buy credit on your installation, see [Add credit](#add-credit). Check the balance on **Usage & billing** or through `account` before deploying.
 
 ### What a trial account gets
 
-`ferrite login --ephemeral` creates a trial account (the CLI calls it a temporary account, error messages call it a test workspace, and its ID starts with `eph-`). A trial account lasts 48 hours and starts with $5 of credit, with no account and no card. It runs one instance per application with 256 MiB of memory and half a CPU and caps source uploads at 32 MiB. When the 48 hours expire, its apps go offline unless someone signs in through the trial's claim link; signing in keeps the account and its applications, and lets you buy more credit.
+`ferrite login --ephemeral` creates a trial account (the CLI calls it a temporary account, error messages call it a test workspace, and its ID starts with `eph-`). A trial account lasts 48 hours and starts with $5 of credit, with no account and no card. It runs one instance per application with 256 MiB of memory and half a CPU and caps source uploads at 32 MiB. When the 48 hours expire, its apps go offline unless someone signs in through the trial's claim link; signing in keeps the account and its applications.
 
 On Ferrite Cloud, `ferrite deploy` deploys directly from a trial account. Before the trial expires, an agent holding the session's `claim_token` can move its apps into a durable account with the MCP `claim` tool; see [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
 
@@ -46,7 +46,7 @@ For per-app traffic and spend, call `usage`. It returns request, error, byte, an
 
 When funds cannot cover paid work, the platform enforces the limit at three points:
 
-- Deployments fail before building if the balance cannot cover the deploy fee. The CLI prints `INSUFFICIENT_CREDIT` with a reason such as `the account holds 0 micros and a deploy needs 15000; nothing was built or charged` (using your balance and the installation's fee). MCP tools return `InsufficientCredit` with `have_micros`, `need_micros`, and `how_to_pay` (the URL of the account's top-up page). Nothing builds and nothing is charged.
+- Deployments fail before building if the balance cannot cover the deploy fee. The CLI prints `INSUFFICIENT_CREDIT` with a reason such as `the account holds 0 micros and a deploy needs 15000; nothing was built or charged` (using your balance and the installation's fee). MCP tools return `InsufficientCredit` with `have_micros`, `need_micros`, and `how_to_pay`, which can contain a top-up URL even when the installation has disabled checkout. Check **Usage & billing** for purchasing availability. Nothing builds and nothing is charged.
 - Where the gateway credit check is enabled, requests to an app return `402 Payment Required` with the body `prepaid balance exhausted; no lease, no service`.
 - On Ferrite Cloud, where running apps are metered, reaching a zero balance stops running apps. The platform holds stopped apps for 30 days and then deletes them along with their data, which cannot be recovered.
 
@@ -57,20 +57,18 @@ Durable accounts follow a fixed shutdown and recovery sequence:
 3. Adding credit that leaves at least one day of runway at the resumed rate and at least $1.00 triggers an automatic restart of each app at its saved instance count and autoscale setting. If you manually scale a stopped app before topping up, the platform keeps your chosen count instead of restoring the recorded one.
 4. After the 30-day deadline, the apps are withdrawn and their data is permanently deleted.
 
-Read these events through `notifications`, or have the platform push them to an HTTPS endpoint as signed webhooks by calling `set_notify_channel` (`notify_channel` checks delivery health). After an automatic restart, open each app's URL to confirm it answers. Trial accounts skip the 30-day hold; their apps suspend as soon as credit runs out, and more credit is bought after signing in to keep the trial.
+Read these events through `notifications`, or have the platform push them to an HTTPS endpoint as signed webhooks by calling `set_notify_channel` (`notify_channel` checks delivery health). After an automatic restart, open each app's URL to confirm it answers. Trial apps suspend as soon as trial credit runs out. Use the trial’s claim link to keep the account before it expires.
 
 A `502 Bad Gateway` response with the body `credit ledger unavailable` means the gateway could not reach the account ledger, so it refused traffic instead of serving requests unmetered. Your balance is not the cause. If the response continues for more than a few minutes, report it with the deployed app ID and the UTC time.
 
 ## Add credit
 
-Top up credit through the billing page in a browser. Claim the account first if it has no owner.
+On Ferrite Cloud, **Usage & billing** shows your balance and says “Purchasing is disabled.” For billing questions, [contact Ferrite support](/kb/guide/get-help-from-the-ferrite-team/) with your account ID. If your agent receives a `topup_url` from `billing_portal`, check the purchasing status in the dashboard before using it.
 
-Ask your agent to call `billing_portal`, then open the returned `topup_url` in a browser. Enter card details only on the hosted checkout page, never in a chat or terminal. The balance updates once the account ledger confirms payment.
+On installations with card checkout enabled, claim the account first, then open the `topup_url` from `billing_portal` in your browser. Enter card details only on the hosted checkout page. The balance updates once the account ledger confirms payment.
 
-On installations with test credit enabled, the dashboard's **Usage & billing** page shows **Add test credit** instead of checkout. An account owner or administrator can enter an amount and click **Add test credit** at no cost.
+On installations with test credit enabled, an owner or administrator can use **Add test credit** on **Usage & billing**. On other installations, contact the operator for funding options.
 
-On installations without card checkout or test credit, such as a local fleet, `billing_portal` can still appear in the tool list and return a `topup_url` with nothing serving behind it. Ask whoever operates that installation to add credit. If you hit that behavior on Ferrite Cloud, send the Ferrite team your account ID and what you need credit for; see [Get help from the Ferrite team](/kb/guide/get-help-from-the-ferrite-team/).
-
-If `billing_portal` returns another error, a confirmed payment does not appear within a few minutes, or a line in `account_statement` looks wrong, email the Ferrite team with your account ID, the UTC time of the payment or charge, and the statement line. Never send card details.
+If `billing_portal` returns an error, a confirmed payment does not appear within a few minutes, or a line in `account_statement` looks wrong, email the Ferrite team with your account ID, the UTC time of the payment or charge, and the statement line. Never send card details.
 
 To work beyond the 48-hour trial window, sign in through the trial's claim link to keep it ([Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)), or create a durable account with `ferrite login --id` and claim it; durable accounts have no 48-hour limit. See [Connect the CLI to your account](/kb/guide/fix-sign-in-problems/#connect-the-cli-to-your-account).

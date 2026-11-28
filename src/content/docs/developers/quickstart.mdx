@@ -136,7 +136,7 @@ account you own; this computer's login follows. A script can transfer the apps
 itself with the [CLI claim procedure](/developers/cli-commands/#ferrite-claim) or the
 [MCP-only transfer](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
 Then open the original URL and verify the data is still there. Durable accounts
-have no 48-hour limit, and you buy more credit for them in the Dashboard.
+have no 48-hour limit.
 
 `ferrite cost` (MCP: `estimate_cost`) checks your prepaid balance, the deploy
 fee, and each app's projected monthly rate at current pricing without charging
@@ -146,8 +146,8 @@ costs roughly $8 a month. Pass `--instances` to match your target replica count.
 underlying charges and top-ups.
 
 Every charge draws from the prepaid balance, and a deploy the balance cannot
-fund fails with `INSUFFICIENT_CREDIT`. The MCP `billing_portal` tool returns a
-top-up link. When a funded account hits zero, its applications stop and are kept
+fund fails with `INSUFFICIENT_CREDIT`. For help funding an account on Ferrite Cloud,
+[contact Ferrite support](/kb/guide/get-help-from-the-ferrite-team/) with your account ID. When a funded account hits zero, its applications stop and are kept
 for 30 days before permanent deletion with their data. Trial accounts cannot be
 funded and suspend as soon as their credit runs out. Account-wide spending
 ceilings are tracked separately in the Dashboard.

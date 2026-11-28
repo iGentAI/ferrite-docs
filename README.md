@@ -1,25 +1,30 @@
 # Ferrite documentation
 
-This repository holds the source text of the documentation published at <https://docs.ferrite.cloud>, so that a reader who finds a mistake can point at the exact line.
+Ferrite maintains its public developer guides, Academy courses, knowledge base, blog, changelog and agent setup instructions here. The production site selects a commit of this repository for each release. Read the [Ferrite documentation](https://docs.ferrite.cloud).
 
 | Path | Contents |
 | --- | --- |
-| `src/content/docs/` | The developer documentation: guides and reference for building, deploying and running applications on Ferrite |
-| `src/content/academy/` | The Academy courses, one directory per course |
-| `src/content/kb/` | The knowledge base: short answers to specific problems |
-| `src/content/blog/`, `src/content/changelog/` | Blog posts and the change log |
-| `public/agent-setup/` | The setup skills a coding agent reads to connect itself to Ferrite |
+| `src/content/docs/developers/` | Developer guides and reference |
+| `src/content/academy/` | Courses and lessons |
+| `src/content/kb/` | Answers to common questions |
+| `src/content/blog/` and `src/content/changelog/` | Posts and release notes |
+| `public/agent-setup/` | Downloadable instructions for coding agents |
 
-Every file here is a page the site serves, though some published pages are not in this snapshot yet. A file at `src/content/docs/developers/quickstart.mdx` is the page at `https://docs.ferrite.cloud/developers/quickstart/`, and each page is also served as Markdown at the same address with `.md` in place of the trailing slash.
+## Check a change
 
-The program that turns these files into the site, its page templates and its images are not part of this repository, so the site is not built from it.
+With Node.js 24 and npm installed, run:
 
-## Correcting the documentation
+```sh
+npm ci
+npm run build
+```
 
-Open an issue that names the file and the line, says what is wrong, and says what it should say if you know. A command that fails or an example that does not compile is the most useful kind of report: include the command and its output. Corrections are made in Ferrite's own source tree, and this repository is replaced by the next snapshot.
+The build checks page titles and compiles the Markdown and MDX. It writes the content and its rights notices to `dist/ferrite-docs.tar.gz`. The site publisher combines the selected revision with the site theme and assets, then checks the rendered routes, links, search index and Ferrite application before deployment.
 
-## Licence and contributions
+A guide such as `src/content/docs/developers/quickstart.mdx` appears at [Quickstart](https://docs.ferrite.cloud/developers/quickstart/) and is also available [as Markdown](https://docs.ferrite.cloud/developers/quickstart.md).
 
-The documentation text is copyright iGent AI and is not offered under an open source licence; see `LICENSE`. This repository accepts issues and does not accept outside pull requests; see `CONTRIBUTING.md`. Report a security problem to security@ferrite.cloud, as `SECURITY.md` describes. The hosted Ferrite platform is proprietary and not open source.
+## Corrections and rights
 
-This repository is a scrubbed public snapshot prepared by the Ferrite team and carries no private development history.
+Open an issue with the file and line, the correction, and a command or example that demonstrates it where applicable. See [Contributing](CONTRIBUTING.md). For support, contact info@igent.ai. Report security issues privately to security@ferrite.cloud as described in [Security](SECURITY.md).
+
+Copyright 2026 iGent AI. All rights reserved. The [licence](LICENSE) covers this documentation. The hosted Ferrite platform is proprietary.

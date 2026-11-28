@@ -113,18 +113,18 @@ After a platform release, accounts from the previous installation no longer exis
 
 ## The balance can't fund the deployment
 
-The platform checks your balance before starting a build. If your balance cannot cover the deploy fee, `ferrite deploy` exits with status `1` with `INSUFFICIENT_CREDIT` in CLI output (and `InsufficientCredit` in MCP, carrying `have_micros`, `need_micros`, and `how_to_pay`). Those fields report your current balance and the required fee.
+The platform checks your balance before starting a build. If your balance cannot cover the deploy fee, `ferrite deploy` exits with status `1` with `INSUFFICIENT_CREDIT` in CLI output (and `InsufficientCredit` in MCP, carrying `have_micros`, `need_micros`, and `how_to_pay`). The first two fields give your balance and the required fee in micros. The `how_to_pay` link can appear even when checkout is disabled. Check **Usage & billing** for purchase availability.
 
-Ask your agent to call `billing_portal` to get a top-up link for the account owner. On a trial account, first sign in through its claim link to keep the account ([Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)), then buy credit, or deploy from a durable account instead.
+On Ferrite Cloud, self-service checkout is currently unavailable. If a durable account needs credit, [contact Ferrite support](/kb/guide/get-help-from-the-ferrite-team/) with its account ID. Trials cannot receive additional credit. To keep a trial account and its apps, sign in through its [claim link](/kb/guide/claim-an-agent-created-account/).
 
-Because no build started and nothing was charged, add credit and deploy the same project again. Check fees ahead of time with `ferrite cost` (or `estimate_cost`), and inspect your balance with `ferrite statement`. See [Understand usage and credits](/kb/guide/usage-and-credits/).
+The refusal leaves your balance and project intact. Once the account has enough credit, you can deploy the same project again. Check fees ahead of time with `ferrite cost` (or `estimate_cost`), and inspect your balance with `ferrite statement`. See [Understand usage and credits](/kb/guide/usage-and-credits/).
 
 ## Deploying from a trial account
 
 `ferrite login --ephemeral` creates a trial account (shown as a temporary account in the CLI, with an ID starting with `eph-`). It deploys directly under fixed caps:
 
 - 48-hour lifetime, after which its apps go offline unless you sign in to keep the account
-- $5 starting credit, enough to run an app or a few; more credit is bought after you sign in
+- $5 starting credit, enough to run an app or a few
 - 1 instance per application, 256 MiB memory, 0.5 CPU
 - 32 MiB maximum source upload
 

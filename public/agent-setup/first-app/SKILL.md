@@ -63,4 +63,4 @@ Once verified, provide **Open your live app** as a link to the returned HTTPS UR
 
 Before the first deploy of a new app, run `ferrite cost` (or `estimate_cost`) and report the deploy fee, projected monthly cost, and current account balance. Ask for confirmation before deploying unless the user already explicitly authorized it. Whenever asked what an app costs, run `ferrite cost` in its project directory or call `estimate_cost` with its manifest, and explain that running resources and requests are metered.
 
-Read `ferrite statement` or `account_statement` for current balance and recorded charges. A trial starts with $5 and draws down as charges apply, and more credit is bought in the Dashboard; never infer current balance from the starting credit. `mcp-serve` exposes these as `remote_estimate_cost` and `remote_account_statement`.
+Read `ferrite statement` or `account_statement` for current balance and recorded charges. A trial starts with $5 and draws down as charges apply. `mcp-serve` exposes these as `remote_estimate_cost` and `remote_account_statement`.

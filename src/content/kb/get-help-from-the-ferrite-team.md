@@ -12,6 +12,8 @@ The three people who run Ferrite read and answer support email themselves. Write
 
 Email [info@igent.ai](mailto:info@igent.ai?subject=Ferrite%20support) with `Ferrite support` in the subject line. You do not need an active dashboard session, so use this route whenever you are locked out.
 
+If your durable account needs credit and **Usage & billing** shows purchasing is disabled, include the account ID and explain what you want to deploy. Trials cannot receive additional credit. To keep a trial and its apps, use its [claim link](/kb/guide/claim-an-agent-created-account/) first.
+
 ## Report a security issue
 
 Send security reports privately to [security@ferrite.cloud](mailto:security@ferrite.cloud?subject=Ferrite%20security) with `Ferrite security` in the subject line. Include the affected product, reproduction steps, and impact, and omit passwords, tokens, and personal data. The [security contact record](/.well-known/security.txt) lists this channel and its expiry date.

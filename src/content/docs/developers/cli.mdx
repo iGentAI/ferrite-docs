@@ -8,6 +8,8 @@ order: 3.5
 
 The Ferrite CLI covers the local side of building on Ferrite. Use it to scaffold projects, check code against platform rules, run apps against local planes, run tests, manage secrets and custom domains, and submit builds. Control-plane work such as scaling, releases, environments, and rollbacks runs through Ferrite MCP instead.
 
+The [Ferrite CLI repository](https://github.com/iGentAI/ferrite-cli) contains the installer, release binaries and checksums.
+
 ## Install Ferrite
 
 Install the signed, checksum-verified binary with the shell installer:
@@ -153,7 +155,7 @@ An unchanged project submits nothing and incurs no charge. Updating a secret wit
 
 Deploys use whichever account the stored credential selects, including a trial account from `ferrite login --ephemeral`. A trial account lasts 48 hours, starts with $5 of credit, enough to run an app or a few, and runs one instance per app with 256 MiB of memory and half a CPU. After 48 hours its apps go offline unless you sign in. To keep it, open its `claim_url` link and sign in: **Keep this as my account** makes the trial permanent in place with the same apps and URLs, and **Move it into** an account you already own moves the apps there. `ferrite claim` moves the apps into a new durable account from the terminal. Durable accounts have no 48-hour limit.
 
-Every charge draws from your prepaid balance. A deploy your balance cannot cover fails before anything is built or charged, returning `INSUFFICIENT_CREDIT` with what the account holds and what the deploy requires. When a durable account's balance reaches zero, its applications stop, remain kept for 30 days, and are then deleted permanently with their data. A trial account's apps suspend as soon as its credit runs out; sign in to keep the trial, and then buy more credit in the Dashboard. Run `ferrite statement` to inspect your balance and charges.
+Every charge draws from your prepaid balance. A deploy your balance cannot cover fails before anything is built or charged, returning `INSUFFICIENT_CREDIT` with what the account holds and what the deploy requires. When a durable account's balance reaches zero, its applications stop, remain kept for 30 days, and are then deleted permanently with their data. A trial account's apps suspend as soon as its credit runs out; sign in through the claim link to keep the trial. Run `ferrite statement` to inspect your balance and charges.
 
 When a submission's outcome is uncertain, the CLI reports `DEPLOY_SUBMIT_UNKNOWN` with a `cause` (for example `MCP HTTP 502`) and a `resume` command. A refusal returned by the platform before running the request is terminal and carries the platform's exact message.
 

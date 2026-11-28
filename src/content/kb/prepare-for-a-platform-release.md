@@ -43,7 +43,7 @@ Back up everything you will need to reconstruct your deployments:
 
 Rebuild your account and apps in this order:
 
-1. Create a new account and sign in again (see [Sign-in stopped working after a platform release](/kb/guide/sign-in-stopped-working-after-a-platform-release/) for trial and durable accounts). If you plan to keep the account, claim it again per [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/). A new trial account starts with $5 of credit; any other account starts without credit, so buy credit in the Dashboard before deploying to it.
+1. Create a new account and sign in again (see [Sign-in stopped working after a platform release](/kb/guide/sign-in-stopped-working-after-a-platform-release/) for trial and durable accounts). If you plan to keep the account, claim it again per [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/). A new trial account starts with $5 of credit; any other account starts without credit, so check its balance before deploying.
 2. Re-apply each secret with `ferrite secrets set NAME`, or have your agent call `set_secret`.
 3. Run `ferrite deploy` from your local source tree. The app starts with empty service bindings, so populate any required initial state through your app's code, pages, or API.
 4. Check the app's assigned URL. The default host derives from the app ID (`ACCOUNT/NAME`). Every trial account receives a new account ID and therefore a new host; an app keeps its previous default host only when deployed under the same account ID and app name. If the host changed, update published links, external webhook URLs, and discovery documents. See [Find your app's URL](/kb/guide/find-your-app-url/).

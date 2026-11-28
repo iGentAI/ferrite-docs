@@ -148,7 +148,7 @@ When the refused login is a trial's (its account id starts with `eph-`), the tri
 
 Reads your project's `ferrite.json`, applies the standard upstream projection, and asks the platform for an estimate using your stored account credential. `ferrite cost` (MCP: `estimate_cost`) reports your account balance, the deploy fee, each application's projected monthly cost at current rates, each application's hourly compute cost, and any validation violations. It charges nothing and deploys nothing. Monthly figures are projections from current rates and the requested footprint; actual metered usage can differ.
 
-An estimate does not cap spending. Your real ceilings are your prepaid balance and any spending limit set in the [Dashboard](/developers/dashboard/#read-credit-and-usage). When a durable account's balance reaches zero, its applications stop, remain retained for 30 days, and are then deleted permanently with their data. A trial account's applications suspend when its credit runs out; to buy more, sign in through the trial's claim link to keep the account. See [Understand usage and credits](/kb/guide/usage-and-credits/) for the low-balance warnings the platform records and [Before you deploy: what it will cost](/developers/deployments/#before-you-deploy-what-it-will-cost) for when to read and how to use an estimate.
+An estimate does not cap spending. Your real ceilings are your prepaid balance and any spending limit set in the [Dashboard](/developers/dashboard/#read-credit-and-usage). When a durable account's balance reaches zero, its applications stop, remain retained for 30 days, and are then deleted permanently with their data. A trial account's applications suspend when its credit runs out. Sign in through the trial's claim link to keep the account. See [Understand usage and credits](/kb/guide/usage-and-credits/) for the low-balance warnings the platform records and [Before you deploy: what it will cost](/developers/deployments/#before-you-deploy-what-it-will-cost) for when to read and how to use an estimate.
 
 | Flag | Effect |
 | --- | --- |
@@ -160,7 +160,7 @@ An invalid specification exits `2`; check the verdict before treating an estimat
 
 ### `ferrite statement`
 
-Reads your authenticated account's balance, total charges, funding, and recent billing entries explaining how the balance reached its current value. A trial account starts with $5 of credit and lasts 48 hours, after which its applications go offline unless someone signs in to keep it. Before then, open the link [`ferrite claim --link`](#ferrite-claim) prints to keep the trial as your own account or move its applications into one you already own; after signing in you can buy more credit in the Dashboard. Pass `--json` for the complete platform statement. This command reads billing records and makes no payment.
+Reads your authenticated account's balance, total charges, funding, and recent billing entries explaining how the balance reached its current value. A trial account starts with $5 of credit and lasts 48 hours, after which its applications go offline unless someone signs in to keep it. Before then, open the link [`ferrite claim --link`](#ferrite-claim) prints to keep the trial as your own account or move its applications into one you already own. Pass `--json` for the complete platform statement. This command reads billing records and makes no payment.
 
 ### `ferrite claim`
 

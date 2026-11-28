@@ -45,8 +45,7 @@ When a durable account's balance reaches zero, its applications stop. They
 stay suspended for 30 days and are then deleted along with their data, which
 cannot be recovered. A trial account's apps suspend if its credit runs out, and
 they go offline when the 48-hour window ends unless you signed in through the
-trial's claim link beforehand to keep them; after signing in you can buy more
-credit. See
+trial's claim link beforehand to keep them. See
 [Understand usage and credits](/kb/guide/usage-and-credits/) for balance rules
 and account tiers.
 

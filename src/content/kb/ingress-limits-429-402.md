@@ -58,7 +58,7 @@ Where credit checks are enabled, the gateway bills requests in batches of 64 so 
 
 Stop retrying on `402`. Every subsequent request fails until the account has more credit.
 
-When the balance hits zero, your applications stop. They are retained for 30 days and then permanently deleted along with their data. A trial account's apps are suspended when credit runs out; sign in through its claim link to keep the account and buy more. See [Understand usage and credits](/kb/guide/usage-and-credits/) for how the `notifications` tool reports each stage and how apps restart after a top-up.
+When the balance hits zero, your applications stop. They are retained for 30 days and then permanently deleted along with their data. A trial account's apps are suspended when credit runs out; sign in through its claim link to keep the account. See [Understand usage and credits](/kb/guide/usage-and-credits/) for how the `notifications` tool reports each stage and how apps restart after a top-up.
 
 ## `502`: the ledger was unreachable
 
