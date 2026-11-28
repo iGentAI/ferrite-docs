@@ -8,7 +8,7 @@ prerequisites:
   - "A terminal on macOS on Apple silicon, Linux on x86-64, or Linux on ARM64 (glibc 2.34 or newer)"
   - "Rust installed with rustup; the generated project pins Rust 1.89.0, and rustup downloads it on first use"
   - "A coding agent that can run terminal commands, such as Claude Code, Codex, or Cursor, for lesson 1"
-  - "A Ferrite account, created by your coding agent in lesson 1. Unless you ask for a durable account, setup creates a 48-hour trial account (called a temporary account in the CLI) with $50 of credit, one instance per app, 256 MiB of memory, and half a CPU. Durable accounts also start with $50 of welcome credit."
+  - "A Ferrite account, created by your coding agent in lesson 1. Unless you ask for a durable account, setup creates a 48-hour trial account (called a temporary account in the CLI) with $5 of credit, one instance per app, 256 MiB of memory, and half a CPU. Sign in through its claim link to keep it past 48 hours."
   - "curl"
   - "Enough Rust to read a function and act on compiler errors"
 ---

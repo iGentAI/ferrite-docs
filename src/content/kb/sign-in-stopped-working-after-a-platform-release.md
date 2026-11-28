@@ -49,4 +49,4 @@ Update any coding agent that talks to Ferrite:
 
 ## Deployed apps
 
-Once `ferrite account` succeeds, deploy each app again from its source directory with `ferrite deploy`. Every new account on Ferrite Cloud starts with the $50 welcome credit. See [Prepare for a platform release](/kb/guide/prepare-for-a-platform-release/) for the rest of the post-release checklist, including re-entering app secrets.
+Once `ferrite account` succeeds, deploy each app again from its source directory with `ferrite deploy`. A new trial account starts with $5 of credit; a durable account starts without credit, so buy credit in the Dashboard before deploying to it. See [Prepare for a platform release](/kb/guide/prepare-for-a-platform-release/) for the rest of the post-release checklist, including re-entering app secrets.

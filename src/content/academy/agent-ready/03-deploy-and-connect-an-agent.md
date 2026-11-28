@@ -34,7 +34,8 @@ makes no changes.
 
 When an account's balance reaches zero, its applications stop. Durable accounts
 retain stopped apps and their data for 30 days before permanent deletion. Trial
-accounts cannot be funded and suspend apps when credit runs out. For trial
+accounts suspend apps when credit runs out; signing in to keep the trial lets
+you buy more. For trial
 limits and credit rules, see
 [Understand usage and credits](/kb/guide/usage-and-credits/).
 

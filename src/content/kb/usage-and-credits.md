@@ -18,11 +18,11 @@ Every surface reads the same account ledger:
 - In the dashboard, click **Usage** in the account navigation to view the balance on **Usage & billing**.
 - Ask your agent to call `account_statement` for a ledger history: current balance, total charged, total funded, and one row per charge or funding event with the resulting balance.
 
-New trial and durable accounts on Ferrite Cloud receive $50 in platform-funded welcome credit, including durable accounts created with `ferrite login --id` or `provision`. The grant applies once at account creation; existing accounts keep their current balance, and additional credit requires payment. Check the balance on **Usage & billing** or through `account` before deploying instead of assuming the full grant remains.
+A new trial account on Ferrite Cloud receives $5 of credit, enough to run an app or a few for 48 hours. There is no welcome credit: a durable account, including one created with `ferrite login --id` or `provision`, starts without credit, existing accounts keep their current balance, and more credit is bought (see [Add credit](#add-credit)). Check the balance on **Usage & billing** or through `account` before deploying.
 
 ### What a trial account gets
 
-`ferrite login --ephemeral` creates a trial account (the CLI calls it a temporary account, error messages call it a test workspace, and its ID starts with `eph-`). A trial account lasts 48 hours and starts with $50 of credit. It runs one instance per application with 256 MiB of memory and half a CPU, caps source uploads at 32 MiB, and caps total spend at the initial $50 because trial accounts cannot be funded. When the 48 hours expire, the account closes and any running apps are withdrawn.
+`ferrite login --ephemeral` creates a trial account (the CLI calls it a temporary account, error messages call it a test workspace, and its ID starts with `eph-`). A trial account lasts 48 hours and starts with $5 of credit, with no account and no card. It runs one instance per application with 256 MiB of memory and half a CPU and caps source uploads at 32 MiB. When the 48 hours expire, its apps go offline unless someone signs in through the trial's claim link; signing in keeps the account and its applications, and lets you buy more credit.
 
 On Ferrite Cloud, `ferrite deploy` deploys directly from a trial account. Before the trial expires, an agent holding the session's `claim_token` can move its apps into a durable account with the MCP `claim` tool; see [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
 
@@ -57,7 +57,7 @@ Durable accounts follow a fixed shutdown and recovery sequence:
 3. Adding credit that leaves at least one day of runway at the resumed rate and at least $1.00 triggers an automatic restart of each app at its saved instance count and autoscale setting. If you manually scale a stopped app before topping up, the platform keeps your chosen count instead of restoring the recorded one.
 4. After the 30-day deadline, the apps are withdrawn and their data is permanently deleted.
 
-Read these events through `notifications`, or have the platform push them to an HTTPS endpoint as signed webhooks by calling `set_notify_channel` (`notify_channel` checks delivery health). After an automatic restart, open each app's URL to confirm it answers. Trial accounts skip the 30-day hold because they cannot be funded; their apps suspend as soon as credit runs out.
+Read these events through `notifications`, or have the platform push them to an HTTPS endpoint as signed webhooks by calling `set_notify_channel` (`notify_channel` checks delivery health). After an automatic restart, open each app's URL to confirm it answers. Trial accounts skip the 30-day hold; their apps suspend as soon as credit runs out, and more credit is bought after signing in to keep the trial.
 
 A `502 Bad Gateway` response with the body `credit ledger unavailable` means the gateway could not reach the account ledger, so it refused traffic instead of serving requests unmetered. Your balance is not the cause. If the response continues for more than a few minutes, report it with the deployed app ID and the UTC time.
 
@@ -73,4 +73,4 @@ On installations without card checkout or test credit, such as a local fleet, `b
 
 If `billing_portal` returns another error, a confirmed payment does not appear within a few minutes, or a line in `account_statement` looks wrong, email the Ferrite team with your account ID, the UTC time of the payment or charge, and the statement line. Never send card details.
 
-To work beyond the 48-hour trial window, create a durable account with `ferrite login --id` and claim it; durable accounts have no 48-hour limit. See [Connect the CLI to your account](/kb/guide/fix-sign-in-problems/#connect-the-cli-to-your-account).
+To work beyond the 48-hour trial window, sign in through the trial's claim link to keep it ([Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)), or create a durable account with `ferrite login --id` and claim it; durable accounts have no 48-hour limit. See [Connect the CLI to your account](/kb/guide/fix-sign-in-problems/#connect-the-cli-to-your-account).

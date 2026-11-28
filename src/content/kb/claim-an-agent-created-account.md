@@ -6,7 +6,7 @@ updated: 2026-11-25
 featured: true
 ---
 
-Ask your agent for the claim link, open it, and sign in with Google or GitHub. That one step makes the account yours. Agents open Ferrite accounts on their own, so you can try Ferrite without signing up: a terminal agent runs `ferrite login --ephemeral`, and a connector starts the same trial when you choose **Try Ferrite without an account**. A trial lasts 48 hours with $50 of credit, one instance per app, 256 MiB of memory and half a CPU, and it is deleted with its apps when the 48 hours end unless you keep it.
+Ask your agent for the claim link, open it, and sign in with Google or GitHub. That one step makes the account yours. Agents open Ferrite accounts on their own, so you can try Ferrite without signing up: a terminal agent runs `ferrite login --ephemeral`, and a connector starts the same trial when you choose **Try Ferrite without an account**. A trial gets $5 of credit, enough to run an app or a few for 48 hours, with one instance per app, 256 MiB of memory and half a CPU, and its apps go offline when the 48 hours end unless you sign in to keep them.
 
 ## Keep it or move it
 
@@ -14,7 +14,7 @@ After you sign in through the claim link, a trial offers two choices:
 
 | Choice | What happens |
 | --- | --- |
-| **Keep this as my account** | The trial becomes a permanent account of your own, with the same apps, their URLs and data, and the welcome credit. Its account ID changes from `eph-…` to a readable one, and the CLI login and every connected agent follow it automatically. The 48-hour deadline and the trial limits are gone. |
+| **Keep this as my account** | The trial becomes a permanent account of your own, with the same apps, their URLs and data. Its account ID changes from `eph-…` to a readable one, and the CLI login and every connected agent follow it automatically. The 48-hour deadline and the trial limits are gone, and you buy more credit in the Dashboard. |
 | **Move it into** your existing account | The trial's apps move into the account you already own, with their IDs, URLs and data. The CLI login and every connected agent of the trial follow them, so their next call already works in your account. |
 
 Choose **Keep** when this is your first Ferrite account. Choose **Move** when you already have one, so all your apps live in one place. A durable account that an agent created without an owner has nothing to keep: signing in simply attaches it to you.
@@ -28,11 +28,11 @@ Choose **Keep** when this is your first Ferrite account. Choose **Move** when yo
 
 Each claim link works once and expires after 24 hours. Keep it private until you finish, because the first person to complete it becomes the owner. The reply that carries the link also holds a `web_token` for the same claim; keep it as private as the link.
 
-From a terminal, `ferrite claim` on a trial moves its apps into a new durable account and prints that account's dashboard link; on an unowned durable account it prints the ownership link. See [`ferrite claim`](/developers/cli-commands/#ferrite-claim). A script without the CLI moves a trial's apps with the MCP `claim` tool; see [Keep a trial app past its 48 hours](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
+From a terminal, `ferrite claim --link` prints the same link, and `ferrite claim --link --wait` then switches that computer's login to the account the trial went to. Plain `ferrite claim` moves a trial's apps into a new durable account without the Dashboard, for a computer with no person to open the link. See [`ferrite claim`](/developers/cli-commands/#ferrite-claim). A script without the CLI moves a trial's apps with the MCP `claim` tool; see [Keep a trial app past its 48 hours](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
 
 The dashboard then shows the account's prepaid balance. Every charge draws from it, deploys that exceed it are refused, and apps stop when it reaches zero; see [Understand usage and credits](/kb/guide/usage-and-credits/). To add credit, ask your agent to call `billing_portal` and open the returned `topup_url`, or use **Usage & billing** in the dashboard.
 
-If the original agent session is gone, open a new session and ask the agent to call `account`. On the same computer, the CLI and every local agent share one login, so `ferrite claim` in a terminal works too. If no agent and no CLI still holds the account, no claim link can be requested; email the Ferrite team with the account ID.
+If the original agent session is gone, open a new session and ask the agent to call `account`. On the same computer, the CLI and every local agent share one login, so `ferrite claim --link` in a terminal works too. If no agent and no CLI still holds the account, no claim link can be requested; email the Ferrite team with the account ID.
 
 ## Use the account from your other agents
 

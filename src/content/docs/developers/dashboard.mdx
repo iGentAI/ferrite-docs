@@ -130,7 +130,7 @@ caps. Spending limits in the Dashboard handle enforcement.
 
 Charges identify the application or account service, meter, rate, and source
 operation. Expand **Charge details** to inspect model and pricing evidence.
-Welcome credit appears as an explicit grant on the ledger. Amounts keep
+Trial credit appears as an explicit grant on the ledger. Amounts keep
 microcredit precision: 1 credit equals 1,000,000 microcredits ($1.00 USD). When
 attribution or history coverage is incomplete, the Dashboard reports the gap
 directly.
@@ -141,10 +141,11 @@ The export stops if that snapshot cannot be read completely. **Download these
 entries (.csv)** downloads only the rows currently returned in the account
 statement view.
 
-A trial account lasts 48 hours and starts with $50 of credit. It runs one
-instance of each application at 256 MiB of memory and half a CPU, caps source
-uploads at 32 MiB, and cannot be funded, so that $50 is also its hard spending
-limit. A durable account receives a one-time $50 welcome credit.
+A trial account lasts 48 hours and starts with $5 of credit, enough to run an
+app or a few. It runs one instance of each application at 256 MiB of memory and
+half a CPU and caps source uploads at 32 MiB. After 48 hours its applications go
+offline unless someone signs in to keep the account. Once you have signed in,
+you buy more credit here.
 
 When checkout is enabled on your installation, review the quote before opening
 secure checkout. A payment remains pending until the account ledger confirms
@@ -159,8 +160,8 @@ policy, names the exact deletion date, and warns again 7 days and 24 hours
 before deletion. Stopped applications accrue zero charges while held. After 30
 days, the applications and all their data are permanently deleted and cannot be
 recovered. The `notifications` tool returns each of these notices. Trial
-accounts do not enter this 30-day hold; they cannot be funded, and their
-applications suspend as soon as credit runs out.
+accounts do not enter this 30-day hold; their applications suspend as soon as
+credit runs out, and more credit is bought after signing in to keep the trial.
 
 Adding enough credit to cover roughly one day of running at your stopped
 applications' rate (at least $1.00) restarts them automatically at their saved

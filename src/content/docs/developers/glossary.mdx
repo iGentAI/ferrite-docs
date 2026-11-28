@@ -64,9 +64,10 @@ Either of two separate actions:
 
 1. Taking human ownership of an account a coding agent opened, by completing the
    private ownership link returned by the MCP `claim_url` tool (or printed by
-   `ferrite claim` for a durable account).
+   `ferrite claim --link`).
 2. Moving a trial account's applications into a durable account before the trial
-   expires, using `ferrite claim` or the MCP `claim` tool.
+   expires, by keeping or moving it through its claim link (`ferrite claim --link`), or with
+   `ferrite claim` or the MCP `claim` tool where no person can open a link.
 
 On a trial started by the CLI or a connector, the ownership link does both at once: **Keep this as my account** moves the trial's applications into a new durable account of the person's own, and **Move it into** moves them into one they already own. Linking an owner to a trial a script opened with `provision_ephemeral` does not extend its 48-hour clock; move its applications with `claim`.
 See
@@ -228,8 +229,9 @@ An atomic, guarded update across 1 to 64 keys executed through an [APE](#ape)
 ## Trial account
 
 An expiring `eph-` account created with `ferrite login --ephemeral` or the MCP
-`provision_ephemeral` tool. A trial account lasts 48 hours, starts with $50 of
-credit (which cannot be topped up), and runs one instance per application capped
-at 256 MiB of memory and half a CPU. When the 48 hours expire, the account
-closes and any running applications are withdrawn; move applications into a
-[durable account](#durable-account) beforehand with a [claim](#claim).
+`provision_ephemeral` tool. A trial account lasts 48 hours, starts with $5 of
+credit, enough to run an app or a few, and runs one instance per application
+capped at 256 MiB of memory and half a CPU. When the 48 hours expire, its
+applications go offline unless someone signs in to keep them; keep the account
+or move its applications into a [durable account](#durable-account) beforehand
+with a [claim](#claim).

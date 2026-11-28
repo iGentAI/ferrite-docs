@@ -39,7 +39,7 @@ The platform judges health strictly by process liveness; it never probes an HTTP
 
 When a durable account's balance reaches zero, its applications stop. Ferrite keeps those stopped apps and their data for 30 days, then deletes them permanently with no recovery path. The `notifications` feed delivers low-balance warnings ahead of depletion, the stop event, and the scheduled deletion date.
 
-Adding enough credit automatically restarts every application you did not modify while stopped at its prior instance count and autoscale policy. Trial accounts follow different rules: they cannot be funded, have no 30-day retention window, and are suspended when trial credit runs out. See [Read credit and usage](/developers/dashboard/#read-credit-and-usage) for the notice schedule and restart rules, and [Usage and credits](/kb/guide/usage-and-credits/) for the exact thresholds.
+Adding enough credit automatically restarts every application you did not modify while stopped at its prior instance count and autoscale policy. Trial accounts follow different rules: they have no 30-day retention window, they are suspended when trial credit runs out, and more credit is bought after signing in to keep the trial. See [Read credit and usage](/developers/dashboard/#read-credit-and-usage) for the notice schedule and restart rules, and [Usage and credits](/kb/guide/usage-and-credits/) for the exact thresholds.
 
 ## Copies of your data
 

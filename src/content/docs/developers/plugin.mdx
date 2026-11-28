@@ -10,7 +10,7 @@ import AgentSetup from "../../../components/AgentSetup.astro"
 
 Ferrite runs the backend applications your coding agents write under declared boundaries: each app can reach only the destinations and resources in its manifest. Setup installs the Ferrite CLI, connects your coding agent to Ferrite's MCP tools, and opens a trial account if you do not have one yet.
 
-Trial accounts last 48 hours and start with $50 of credit. Each app runs as one instance with 256 MiB of memory and half a CPU.
+A trial account starts with $5 of credit, enough to run an app or a few for 48 hours, with no account and no card; sign in to keep them. Each app runs as one instance with 256 MiB of memory and half a CPU.
 
 <AgentSetup />
 
@@ -80,8 +80,8 @@ agy mcp add ferrite FERRITE_EXECUTABLE mcp-serve
 
 If you are starting fresh without an existing account, run one of the commands below; to reach an account you already own, run `ferrite login --sign-in` instead. Each command below creates a new account and replaces any stored login the platform no longer accepts.
 
-- Run `ferrite login --endpoint https://mcp.ferrite.cloud/mcp --ephemeral --json` to open a trial account (`eph-` prefix) that can deploy immediately within the trial limits at the top of this page. Its applications are deleted with the account after 48 hours unless you keep it through its claim link. Check `deployNote` in the reply for how deployment behaves on the selected platform.
-- Run `ferrite login --endpoint https://mcp.ferrite.cloud/mcp --id ACCOUNT_NAME --json` to create a durable account under your chosen name with $50 in welcome credit on Ferrite Cloud. Check the balance with `ferrite account` before deploying.
+- Run `ferrite login --endpoint https://mcp.ferrite.cloud/mcp --ephemeral --json` to open a trial account (`eph-` prefix) that can deploy immediately within the trial limits at the top of this page. Its applications go offline after 48 hours unless you sign in through its claim link to keep it. Check `deployNote` in the reply for how deployment behaves on the selected platform.
+- Run `ferrite login --endpoint https://mcp.ferrite.cloud/mcp --id ACCOUNT_NAME --json` to create a durable account under your chosen name. It starts without credit, so buy credit in the Dashboard and check the balance with `ferrite account` before deploying.
 
 In Cursor, configure a local stdio server with the absolute executable path as `command` and `["mcp-serve"]` as `args`, and preserve existing server entries. For other clients, use their supported stdio MCP configuration.
 

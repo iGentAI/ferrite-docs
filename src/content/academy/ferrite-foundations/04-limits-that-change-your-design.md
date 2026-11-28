@@ -76,7 +76,7 @@ write inside a `GET` handler safe to repeat.
 ## Account sizing and manifest validation
 
 Your Ferrite account sets compute limits of its own. A trial account lasts 48
-hours and starts with $50 of credit. It runs one instance per application, with
+hours and starts with $5 of credit, enough to run an app or a few. It runs one instance per application, with
 256 MiB of memory and half a CPU. If a deployment manifest asks for more
 instances, memory, or CPU on a trial account, the platform reduces those values
 to the trial bounds without refusing the deploy. Designs that rely on multiple

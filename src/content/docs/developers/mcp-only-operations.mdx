@@ -137,7 +137,7 @@ Additional operational behavior to account for in MCP clients:
 
 ## Keep a trial app past its 48 hours
 
-A trial account lasts 48 hours and starts with $50 of credit. It runs one instance per application with 256 MiB of memory and half a CPU. When the 48 hours expire, the account closes and every app still running in it is withdrawn, unless a person keeps it first.
+A trial account lasts 48 hours and starts with $5 of credit, enough to run an app or a few. It runs one instance per application with 256 MiB of memory and half a CPU. When the 48 hours expire, its apps go offline unless a person signs in to keep it first.
 
 The person keeps it through `claim_url`, which works on every trial connection, including one a connector started. Offer it when the person mentions an existing Ferrite account, wants to keep the work, or wants Ferrite on another device: check `owner_status`, call `claim_url` when no owner is linked, and give the person only the returned `url`, privately. After Google or GitHub sign-in the page offers two choices:
 

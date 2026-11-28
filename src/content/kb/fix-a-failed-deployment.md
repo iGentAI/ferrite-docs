@@ -115,7 +115,7 @@ After a platform release, accounts from the previous installation no longer exis
 
 The platform checks your balance before starting a build. If your balance cannot cover the deploy fee, `ferrite deploy` exits with status `1` with `INSUFFICIENT_CREDIT` in CLI output (and `InsufficientCredit` in MCP, carrying `have_micros`, `need_micros`, and `how_to_pay`). Those fields report your current balance and the required fee.
 
-Ask your agent to call `billing_portal` to get a top-up link for the account owner. Trial accounts cannot be funded; move their apps to a durable account ([Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)) or deploy from a durable account instead.
+Ask your agent to call `billing_portal` to get a top-up link for the account owner. On a trial account, first sign in through its claim link to keep the account ([Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)), then buy credit, or deploy from a durable account instead.
 
 Because no build started and nothing was charged, add credit and deploy the same project again. Check fees ahead of time with `ferrite cost` (or `estimate_cost`), and inspect your balance with `ferrite statement`. See [Understand usage and credits](/kb/guide/usage-and-credits/).
 
@@ -123,12 +123,12 @@ Because no build started and nothing was charged, add credit and deploy the same
 
 `ferrite login --ephemeral` creates a trial account (shown as a temporary account in the CLI, with an ID starting with `eph-`). It deploys directly under fixed caps:
 
-- 48-hour lifetime, after which the account expires and running apps are withdrawn
-- $50 starting credit, which is also the hard spending cap (no top-ups)
+- 48-hour lifetime, after which its apps go offline unless you sign in to keep the account
+- $5 starting credit, enough to run an app or a few; more credit is bought after you sign in
 - 1 instance per application, 256 MiB memory, 0.5 CPU
 - 32 MiB maximum source upload
 
-Ask your agent to call `estimate_cost` to inspect these caps and expected charges. When a refusal names one of these caps, you hit a trial limit; move to a durable account, which has no 48-hour limit.
+Ask your agent to call `estimate_cost` to inspect these caps and expected charges. When a refusal names one of these caps, you hit a trial limit; sign in through the claim link to keep the trial as a durable account, which has no 48-hour limit.
 
 ## Deployed, but the app doesn't work
 

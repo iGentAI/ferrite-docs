@@ -33,7 +33,7 @@ Leave `"artifact_sha256"` set to 64 zeros in a new manifest. The platform record
 
 ## Deploy the app
 
-`ferrite deploy` submits under whichever account `ferrite account` prints, whether that is a durable account (`ferrite login --id <name>`) or a 48-hour trial account (`ferrite login --ephemeral`, starting with $50 of credit and limited to one instance per app at 256 MiB of memory and half a CPU). To keep a trial's apps past 48 hours, move them into a durable account with `ferrite claim` before expiry; see [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
+`ferrite deploy` submits under whichever account `ferrite account` prints, whether that is a durable account (`ferrite login --id <name>`) or a 48-hour trial account (`ferrite login --ephemeral`, starting with $5 of credit and limited to one instance per app at 256 MiB of memory and half a CPU). A trial's apps go offline after 48 hours unless you sign in: to keep them, open the link `ferrite claim --link` prints before expiry and keep the trial or move it into an account you own; see [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
 
 Verify the active account, estimate the price, and deploy:
 
@@ -43,7 +43,7 @@ ferrite cost
 ferrite deploy
 ```
 
-`ferrite cost` (MCP: `estimate_cost`) reports your prepaid balance, the deploy fee, and projected monthly running cost at current rates without building or charging anything. The deploy fee is charged when a submission is accepted and refunded automatically if the build fails; if your balance cannot cover it, the deploy is refused before any build starts and nothing is charged. Refused and failed builds leave zero net charge. Run `ferrite statement` or open **Usage & billing** in the dashboard to review recorded charges. If a durable account's prepaid balance reaches zero, running apps stop and are retained for 30 days before permanent deletion with their data (trial accounts cannot be funded and suspend immediately when credit runs out); see [Understand usage and credits](/kb/guide/usage-and-credits/).
+`ferrite cost` (MCP: `estimate_cost`) reports your prepaid balance, the deploy fee, and projected monthly running cost at current rates without building or charging anything. The deploy fee is charged when a submission is accepted and refunded automatically if the build fails; if your balance cannot cover it, the deploy is refused before any build starts and nothing is charged. Refused and failed builds leave zero net charge. Run `ferrite statement` or open **Usage & billing** in the dashboard to review recorded charges. If a durable account's prepaid balance reaches zero, running apps stop and are retained for 30 days before permanent deletion with their data (a trial suspends its apps as soon as its credit runs out; sign in from its claim link to keep it as your own account, which can then buy credit); see [Understand usage and credits](/kb/guide/usage-and-credits/).
 
 `ferrite deploy` runs the free remote gates first, logs the attempt under `.ferrite/deployments/`, uploads your source, and follows the build (typically several minutes). On success, it prints:
 

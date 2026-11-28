@@ -51,12 +51,14 @@ passphrase once to link this account. Claiming attaches the account and every
 app in it. Sign in to the [Dashboard](https://dashboard.ferrite.cloud/) with
 that provider account; the Dashboard lists only accounts you own.
 
-Linking an owner covers all apps in the account, though it does not extend a
-trial account's lifetime. A trial account lasts 48 hours, starts with $50 of
-credit, and runs one instance per app at 256 MiB of memory and half a CPU; when
-the 48 hours end, the account expires and its running apps are withdrawn.
-Keeping an app and its data at the original URL past 48 hours is a separate
-transfer into a durable account: follow the
+Linking an owner covers all apps in the account. A trial account lasts 48
+hours, starts with $5 of credit, and runs one instance per app at 256 MiB of
+memory and half a CPU; when the 48 hours end, its apps go offline unless
+someone signs in to keep them. Signing in from the trial's claim link and
+choosing **Keep this as my account** keeps the account itself, with the same
+apps, URLs and data and no deadline. A trial opened directly with
+`provision_ephemeral` that the Dashboard never adopted has no claim link; to
+keep its apps past 48 hours, transfer them into a durable account: follow the
 [CLI claim procedure](/developers/cli-commands/#ferrite-claim) or the
 [MCP-only transfer](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
 

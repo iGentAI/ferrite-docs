@@ -50,7 +50,7 @@ The CLI reports all of these as `MCP HTTP 401 Unauthorized: this login is not kn
 | Command | Behavior |
 | --- | --- |
 | `ferrite login --sign-in` | Opens the browser to sign in with Google or GitHub, pick an account you own and click **Allow**, then saves a named login for this computer. This is how a second computer reaches your account. |
-| `ferrite login --ephemeral` | Creates a new 48-hour trial account (`eph-`; CLI calls it a temporary account, error text says test workspace) and overwrites the stored credential. When the 48 hours end, running apps are withdrawn. Use only when starting fresh; never run it to recover an existing account. |
+| `ferrite login --ephemeral` | Creates a new 48-hour trial account (`eph-`; CLI calls it a temporary account, error text says test workspace) and overwrites the stored credential. When the 48 hours end, its apps go offline unless you sign in to keep it. Use only when starting fresh; never run it to recover an existing account. |
 | `ferrite login --id <name>` | Creates a new durable account with that ID and overwrites the stored credential. Claim it afterwards ([Claim an account your agent created](/kb/guide/claim-an-agent-created-account/)). |
 | `ferrite login --credentials-file PATH` | Imports a mode-`600`, user-owned TOML file with `endpoint`, `account_id`, and `token`. Rejects files whose `account_id` does not match what the token authenticates as. `ferrite login --credentials-stdin` reads the same TOML from a pipe. |
 

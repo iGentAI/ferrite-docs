@@ -1,9 +1,11 @@
 ---
 name: agent-setup
-description: Set up Ferrite in any agent from its homepage prompt alone, choosing the route by what the agent can do. An agent with a terminal installs the CLI and registers it as a local MCP server, an agent that can only edit its MCP configuration adds the remote server and signs in through the browser, a chat app adds the Ferrite connector, and a client limited to request headers uses a trial bearer. Then explain Ferrite and its cost, build, deploy, and hand over the live link and the claim link.
+description: Set up Ferrite in any agent from its homepage prompt alone and complete the person's request: when they asked for an app, start a 48-hour trial unless they named an account of their own, build the app on Ferrite, deploy it, and reply with its live link. Choose the route by what the agent can do. An agent with a terminal installs the CLI and registers it as a local MCP server, an agent that can only edit its MCP configuration adds the remote server and signs in through the browser, a chat app adds the Ferrite connector, and a client limited to request headers uses a trial bearer. Then explain Ferrite and its cost, build, deploy, and hand over the live link and the claim link.
 ---
 
 # Set up Ferrite
+
+The person who pasted the prompt that brought you here wants what they asked for running on Ferrite at its own address. The whole request is: set up Ferrite on the route below that fits you, start a trial ($5 of credit, enough to run an app or a few for 48 hours; no account, no card) unless they named an account of their own or one is already signed in here, build the app on Ferrite, deploy it, and reply with its live link and the claim link that keeps it. Read this document in full as plain text before acting; if your fetch tool hands back a summary, download the same address with `curl -fsS` and read that.
 
 This document is all the setup a person needs. They paste one prompt and nothing else: never ask them to download a binary, edit configuration, copy a token or hunt for an API key. Leave their existing projects, agent settings, runtime defaults and credentials intact. This skill authorizes setup: installing the CLI, opening a trial account and connecting this agent. It does not authorize purchases, replacing an account, or edits to unrelated projects.
 
@@ -19,7 +21,17 @@ Decide by what you can do, not by your product's name, and follow only the first
 4. **You are a chat app** (Claude, ChatGPT or Gemini, on the web, desktop or a phone) where the person adds connectors: **Chat apps**.
 5. **Your client can send a fixed request header but has neither browser sign-in nor a local server you can run**, or you are a script: **Header-only clients**.
 
-Every path ends on the same kind of account. A trial lasts 48 hours, starts with $50 of credit, needs no sign-in, and has a claim link that makes it permanent. Start a trial without asking which kind of account the person prefers, and tell them you did.
+Every path ends on the same kind of account. A trial needs no account and no card and starts with $5 of credit, enough to run an app or a few for 48 hours. After 48 hours its apps go offline unless the person signs in through its claim link, which keeps the account and its apps. Signing in reaches an account the person already has, the same one from every agent and device they connect.
+
+### Choose the account
+
+Start a trial unless the person points to an account of their own. Choose by what they asked for, once per conversation:
+
+- **They asked you to build something new** and said nothing about an account: start a trial without asking, tell them you did, and add one sentence saying you can connect their existing Ferrite account instead if they have one.
+- **They asked about something that already exists** (their apps, a build or deploy, visitors, usage, their balance or their account), said they already have an account, or the prompt names one: connect to their account. When they did not say they have one, ask once, "Start fresh with a 48-hour trial, or connect to your existing Ferrite account?", recommending the second, and wait for the answer.
+- **They asked only for setup**: ask the same question, recommending a trial unless they mentioned an account.
+
+A login already stored on this machine (**Use the account already on this machine**) and a connection that is already signed in answer the question themselves: use that account. On a connector or a remote server the person makes the choice on Ferrite's connect page, so tell them which of its two buttons fits.
 
 ## Tell the person first
 
@@ -35,7 +47,7 @@ Every app is ready for AI assistants from its first deploy. Each operation is de
 
 Ferrite draws from a prepaid balance at metered rates and quotes every deploy before you ship. There is no plan fee and no seat fee. A small always-on app costs about $8 a month. Refusals and failed builds are free. When a balance reaches zero, apps stop, stay stored for 30 days, and are then deleted with their data.
 
-On Ferrite Cloud a trial account lasts 48 hours with $50 of platform-funded credit, and each trial app runs one instance with 256 MiB of memory and half a CPU. New durable accounts on Ferrite Cloud start with $50 in welcome credit. Once the app is specified, run `ferrite cost --instances 1` in its directory (MCP: `estimate_cost`) and report the deploy fee and the monthly estimate. The platform's quote is the price.
+On Ferrite Cloud a trial starts with $5 of credit, enough to run an app or a few for 48 hours, with no account and no card. Signing in keeps the account and its apps, and more credit is bought in the Dashboard. Once the app is specified, run `ferrite cost --instances 1` in its directory (MCP: `estimate_cost`) and report the deploy fee and the monthly estimate. The platform's quote is the price.
 
 ## Terminal agents
 
@@ -72,18 +84,18 @@ Never replace a working login, switch endpoints, or create a second account to g
 
 ### Start a trial
 
-With no stored login, start a trial without asking:
+With no stored login, when **Choose the account** says to start a trial:
 
 ```bash
 ferrite login --endpoint MCP_URL --ephemeral --json
 ferrite account --json
 ```
 
-Trial account IDs start with `eph-`. The trial deploys at once, and after 48 hours it is deleted with its apps unless the person keeps it through its claim link (**Hand the account to its owner**). Report the reply's `deployNote`. Then add one sentence: if they already have a Ferrite account, you can connect to it instead with `ferrite login --sign-in`.
+Trial account IDs start with `eph-`. The trial deploys at once, and after 48 hours its apps go offline unless the person signs in through its claim link (**Hand the account to its owner**). Report the reply's `deployNote`. Then add one sentence: if they already have a Ferrite account, you can connect to it instead with `ferrite login --sign-in`.
 
 ### Join an existing account
 
-When the person says they already have an account, or a Dashboard prompt names one that this machine does not hold, run:
+When **Choose the account** says to connect to their account, or a Dashboard prompt names one that this machine does not hold, run:
 
 ```bash
 ferrite login --sign-in
@@ -129,7 +141,7 @@ Use this path when you can edit your own MCP configuration but cannot install th
 
 Signing in opens Ferrite's connect page in the browser. Tell the person what they will see and which button to choose:
 
-- **Try Ferrite without an account** starts the trial: 48 hours, $50 of credit, no sign-in. Recommend it unless they told you they already have an account.
+- **Try Ferrite without an account** starts the trial: $5 of credit, enough to run an app or a few for 48 hours, with no account and no card. Recommend it when **Choose the account** says to start a trial.
 - **Sign in to your Ferrite account** is for a person who already has one: Google or GitHub, pick the account, **Allow**.
 
 Some clients (Antigravity, for one) show a code after the browser step for the person to paste back into the client; say so when yours does. When the client needs a restart to load the new server, say so in one sentence and continue once the Ferrite tools appear. Then follow **Connected agents**.
@@ -152,7 +164,7 @@ Some clients (Antigravity, for one) show a code after the browser step for the p
 | Zed | `"ferrite": {"command": "FERRITE_EXECUTABLE", "args": ["mcp-serve"]}` under `context_servers` in Zed's settings | `"ferrite": {"url": "MCP_URL"}` there | Zed prompts |
 | JetBrains Junie | shape A in `~/.junie/mcp/mcp.json` | shape A there | `/mcp`, then **Authorize** |
 | JetBrains AI Assistant | shape A in **Settings > Tools > AI Assistant > Model Context Protocol (MCP)** | **Header-only clients** | |
-| OpenCode | `"ferrite": {"type": "local", "command": ["FERRITE_EXECUTABLE", "mcp-serve"]}` under `mcp.servers` in `~/.config/opencode/opencode.json` (or `.jsonc`; directly under `mcp` if the file lists servers there) | `"ferrite": {"type": "remote", "url": "MCP_URL"}` there | `opencode mcp auth ferrite` |
+| OpenCode | `opencode mcp add ferrite -- FERRITE_EXECUTABLE mcp-serve`, or `"ferrite": {"type": "local", "command": ["FERRITE_EXECUTABLE", "mcp-serve"]}` under `mcp` in `~/.config/opencode/opencode.jsonc` (or `.json`) | `opencode mcp add ferrite --url MCP_URL`, or `"ferrite": {"type": "remote", "url": "MCP_URL"}` there | `opencode mcp auth ferrite` |
 | Cline | `cline mcp add ferrite --yes -- FERRITE_EXECUTABLE mcp-serve` | `cline mcp add ferrite MCP_URL --transport http --yes` | **Authenticate** in its MCP view |
 | Roo Code | shape A in **Edit Global MCP** | **Header-only clients**, with `"type": "streamable-http"` | |
 | Kilo Code | `kilo mcp add ferrite -- FERRITE_EXECUTABLE mcp-serve` | `kilo mcp add ferrite --url MCP_URL` | `kilo mcp auth ferrite` |
@@ -198,11 +210,11 @@ A browser sign-in makes this connection one entry under **Connected agents** in 
 
 ## Hand the account to its owner
 
-When the person mentions an existing Ferrite account, wants to keep the work, wants to see it in the Dashboard, or wants Ferrite on another device, call `owner_status` (`remote_owner_status` through `mcp-serve`). If the account has no owner, call `claim_url` (`remote_claim_url`) and give them the link; on a trial, give it unprompted with the live link when you deliver the first app. It works on every trial, including one started from a connector.
+When the person mentions an existing Ferrite account, wants to keep the work, wants to see it in the Dashboard, or wants Ferrite on another device, call the MCP tool `owner_status` (`remote_owner_status` through `mcp-serve`). If the account has no owner, call the MCP tool `claim_url` (`remote_claim_url`) and give them the link; on a trial, give it unprompted with the live link when you deliver the first app. It works on every trial, including one started from a connector. These are MCP tools, not CLI subcommands: in a terminal, `ferrite claim --link` prints the same link, and says so instead when an owner is already linked.
 
 The link opens the Dashboard. After Google or GitHub sign-in, on a trial started by the CLI or a connector, it offers two choices:
 
-- **Keep this as my account**: the trial becomes a permanent account of their own, with the same apps, URLs and data and the welcome credit, and the 48-hour deadline is gone. Its ID changes from `eph-…` to a readable one. Every connected agent and every CLI login of the trial follows to it automatically.
+- **Keep this as my account**: the trial becomes a permanent account of their own, with the same apps, URLs and data, and the 48-hour deadline is gone; more credit is bought in the Dashboard. Its ID changes from `eph-…` to a readable one. Every connected agent and every CLI login of the trial follows to it automatically.
 - **Move it into** an account they already own: the apps move into that account with their URLs and data, and every connected agent and CLI login follows, so your next call already acts as their account.
 
 The link works once and expires after 24 hours; share it only with the person, and never extract its `web_token` or build a link from a claim secret. After they finish, call `account` and `owner_status` (or run `ferrite account --json`, which moves this computer's login to the new account by itself) and use the new account ID from then on. Through `mcp-serve`, one call may answer `TRIAL_LOGIN_FOLLOWED`; repeat it. If an owner is already linked, every other agent joins by signing in: `ferrite login --sign-in` on a computer with the CLI, or **Sign in to your Ferrite account** on the connect page of any connector or remote server.

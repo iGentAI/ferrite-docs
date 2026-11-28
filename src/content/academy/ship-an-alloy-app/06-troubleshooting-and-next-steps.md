@@ -75,15 +75,15 @@ what happened.
 The account balance cannot cover the deploy fee, so no build started and
 nothing was charged. Check the balance with `ferrite statement`. On a durable
 account, claim ownership first if unclaimed, then add credit in the dashboard.
-A trial account cannot be funded: move its apps into a durable account first,
-as covered in
+On a trial account, sign in through its claim link to keep it first, then add
+credit, as covered in
 [Claim an account your agent created](/kb/guide/claim-an-agent-created-account/).
 Do not create a new account to bypass the refusal.
 
 ### The deployed studio or the whole account is gone
 
-A trial account expires after 48 hours and withdraws anything still running in
-it. After a platform release, accounts also have to be recreated; see
+A trial account's apps go offline after 48 hours unless someone signed in to
+keep it. After a platform release, accounts also have to be recreated; see
 [Prepare for a platform release](/kb/guide/prepare-for-a-platform-release/).
 Your local project directory stays untouched in both cases. Connect an account
 as covered in lesson 1 and run `ferrite deploy`.
@@ -112,8 +112,8 @@ that charge. To delete the app and stop all billing, run `ferrite withdraw yoga-
 have your agent call `withdraw`. Withdrawal cannot be undone, so export anything you need through
 the app's pages or API beforehand. See
 [Withdraw an app](/kb/guide/withdraw-an-app/) for both operations. A trial
-account requires neither step because it expires after 48 hours and withdraws
-running apps automatically.
+account requires neither step because its apps go offline on their own after
+48 hours unless you sign in to keep them.
 
 ## Next projects
 

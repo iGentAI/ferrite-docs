@@ -124,19 +124,19 @@ ferrite deploy
 Use the account verified during setup. If you skipped agent setup and have no
 account yet, run
 `ferrite login --ephemeral --endpoint https://mcp.ferrite.cloud/mcp` to open a
-48-hour trial account with $50 of credit (one instance per app, 256 MiB of
+48-hour trial account with $5 of credit (one instance per app, 256 MiB of
 memory, half a CPU) and deploy directly from it. If an existing login expired or
 cannot connect, repair it instead of creating a second account.
 
-A trial account expires 48 hours after it opens, and any running apps are
-withdrawn with it. To keep the app and its data at the same address permanently,
+A trial account's apps go offline 48 hours after it opens unless you sign in to
+keep them. To keep the app and its data at the same address permanently,
 open the private claim link (`ferrite claim --link`, or the MCP `claim_url`
 tool), sign in, and choose **Keep this as my account** or **Move it into** an
 account you own; this computer's login follows. A script can transfer the apps
 itself with the [CLI claim procedure](/developers/cli-commands/#ferrite-claim) or the
 [MCP-only transfer](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours).
 Then open the original URL and verify the data is still there. Durable accounts
-have no 48-hour limit and receive a one-time $50 welcome credit.
+have no 48-hour limit, and you buy more credit for them in the Dashboard.
 
 `ferrite cost` (MCP: `estimate_cost`) checks your prepaid balance, the deploy
 fee, and each app's projected monthly rate at current pricing without charging

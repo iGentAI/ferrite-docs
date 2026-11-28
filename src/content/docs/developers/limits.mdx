@@ -23,16 +23,16 @@ Local development adds two flag-level bounds outside `ferrite.json`:
 accepts `0` through `3,600` seconds.
 
 Account and fleet policy can impose tighter ceilings than manifest syntax
-allows. A trial account lasts 48 hours and starts with $50 of credit, which is
-also its hard spend cap because trial accounts cannot be funded. Each trial
+allows. A trial account lasts 48 hours and starts with $5 of credit, enough to
+run an app or a few; more credit is bought after signing in to keep it. Each trial
 application runs one instance capped at 256 MiB of memory and half a CPU, with
 source uploads capped at 32 MiB. A deploy declaring higher compute or more
 instances is clamped to those trial ceilings without refusal; subsequent
 `scale`, `autoscale`, or `set_compute_limit` calls above them are refused by
 name. Call `estimate_cost` to inspect the active caps on your account. Once the
-48 hours expire, the trial closes and any running applications are withdrawn;
+48 hours expire, the trial's applications go offline unless someone signs in;
 see [Keep a trial app past its 48 hours](/developers/mcp-only-operations/#keep-a-trial-app-past-its-48-hours)
-to move applications into a durable account before the deadline.
+to keep them past the deadline.
 
 ## Source and authority
 
@@ -113,8 +113,8 @@ metered, the gateway answers any request the balance cannot fund with
 
 When a funded account's balance reaches zero, its applications stop and remain
 preserved for 30 days before permanent deletion along with their data. Trial
-accounts cannot be funded and suspend their applications as soon as credit runs
-out. The `notifications` tool records deploys refused for lack of credit and
+accounts suspend their applications as soon as credit runs out; signing in to
+keep the trial lets you buy more. The `notifications` tool records deploys refused for lack of credit and
 applications stopped at zero balance. See
 [Understand usage and credits](/kb/guide/usage-and-credits/) for balance
 tracking, statements, charges, and top-ups.

@@ -13,7 +13,7 @@ An account ID's prefix tells you how the account was created and what limits app
 
 | Prefix | Created by | Lifetime and limits |
 | --- | --- | --- |
-| `eph-` | `ferrite login --ephemeral`, **Try Ferrite without an account** on a connector, or MCP `provision_ephemeral` | Trial account (the CLI calls it a temporary account). Lasts 48 hours with $50 of credit, one instance per app, 256 MiB memory, and half a CPU, and is deleted with its apps after 48 hours unless you keep it through its claim link. Keeping it creates a durable account with a new, readable ID and the same apps, URLs and data, and every login and connected agent follows. |
+| `eph-` | `ferrite login --ephemeral`, **Try Ferrite without an account** on a connector, or MCP `provision_ephemeral` | Trial account (the CLI calls it a temporary account). Lasts 48 hours with $5 of credit, one instance per app, 256 MiB memory, and half a CPU, and its apps go offline after 48 hours unless you sign in through its claim link to keep it. Keeping it creates a durable account with a new, readable ID and the same apps, URLs and data, and every login and connected agent follows. |
 | `oauth-` | A chat connector that connected before connector sign-in existed | A separate account of its own. Disconnect the connector, connect it again, and choose **Sign in to your Ferrite account** to work in your own account. |
 | Any other ID | `ferrite login --id <name>`, MCP `provision`, the connect page's **Create my Ferrite account**, or keeping or moving a trial | Durable account with no 48-hour expiry and no trial compute cap. |
 
